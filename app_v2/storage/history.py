@@ -38,3 +38,9 @@ async def add_query(uid: int, query: str):
 def get_history(uid: int) -> list:
     db = _load()
     return db.get(str(uid), [])
+
+async def clear_history(uid: int):
+    async with _lock:
+        db = _load()
+        db.pop(str(uid), None)
+        _save(db)
