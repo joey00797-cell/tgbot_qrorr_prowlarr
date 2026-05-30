@@ -1,0 +1,13 @@
+services:
+  torrent-bot-v2:
+    build:
+      context: .
+      dockerfile: app_v2/Dockerfile
+    container_name: torrent-bot-v2
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Kiev
+    volumes:
+      - ./app_v2/storage:/app/app_v2/storage

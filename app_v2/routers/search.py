@@ -1,0 +1,449 @@
+import asyncio
+import html
+import logging
+import re
+from aiogram import Router, types, F
+from aiogram.types import LinkPreviewOptions, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from routers.talker import handle_talking
+from services.prowlarr import search as search_prowlarr
+from services.metadata import get_movie_metadata
+from storage.downloads import save_download
+from storage.history import add_query
+import config as _config
+
+router = Router()
+log = logging.getLogger("torrent_bot")
+
+search_results_cache = {}  # uid -> {"results": [...], "query": "..."}
+pending_choices = {}        # uid -> {"hash": ..., "cat": ..., "notify": ..., "title": ...}
+
+MENU_BUTTONS = {
+    "📊 Статус закачек",
+    "📥 Добавить торрент",
+    "🔍 Поиск торрентов",
+    "⚙️ Админка",
+    "🏠 Главное меню",
+}
+
+SESSION_EXPIRED = "⏰ Сессия поиска устарела — отправь запрос заново."
+
+CAT_MOVIE = _config.QBIT_CAT_MOVIE
+CAT_TV    = _config.QBIT_CAT_TV
+CAT_NONE  = "none"
+
+def e(text: str) -> str:
+    return html.escape(str(text))
+
+def detect_category(title: str) -> str:
+    t = title.lower()
+    tv_patterns = [
+        r's\d{1,2}e\d{1,2}', r'\[s\d{2}\]', r'\(s\d{2}\)',
+        r's\d{2}e\d', r'сезон\s*\d', r'season\s*\d', r'e\d{1,2}\s*of\s*\d',
+    ]
+    return CAT_TV if any(re.search(p, t) for p in tv_patterns) else CAT_MOVIE
+
+def clean_and_format_title(raw_title: str, search_query: str = None) -> str:
+    has_russian = bool(re.search('[а-яА-Я]', raw_title))
+    if not has_russian and search_query:
+        clean_query = search_query.strip().capitalize()
+        if not raw_title.lower().startswith(clean_query.lower()):
+            return f"{clean_query} / {raw_title}"
+    return raw_title
+
+def build_choice_keyboard(uid: int):
+    choice = pending_choices.get(uid, {})
+    cat = choice.get("cat")
+    notify = choice.get("notify")
+
+    tv_label  = "📺 Сериал ✓" if cat == CAT_TV    else "📺 Сериал"
+    mov_label = "🎬 Фильм ✓"  if cat == CAT_MOVIE else "🎬 Фильм"
+    non_label = "📦 Прочее ✓" if cat == CAT_NONE  else "📦 Прочее"
+    me_label  = "🔔 Только мне ✓" if notify == "me"  else "🔔 Только мне"
+    all_label = "📢 Всем ✓"       if notify == "all" else "📢 Всем"
+
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text=tv_label,  callback_data="choice_cat_tv"),
+        InlineKeyboardButton(text=mov_label, callback_data="choice_cat_movie"),
+        InlineKeyboardButton(text=non_label, callback_data="choice_cat_none"),
+    )
+    kb.row(
+        InlineKeyboardButton(text=me_label,  callback_data="choice_notify_me"),
+        InlineKeyboardButton(text=all_label, callback_data="choice_notify_all"),
+    )
+    if cat is not None and notify is not None:
+        kb.row(InlineKeyboardButton(text="✅ Подтвердить", callback_data="choice_confirm"))
+    else:
+        kb.row(InlineKeyboardButton(text="⬜ Выбери категорию и уведомление", callback_data="choice_noop"))
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="choice_cancel"))
+    return kb.as_markup()
+
+def local_generate_search_page(results, page=1, per_page=5, search_query=None):
+    total = len(results)
+    start = (page - 1) * per_page
+    end = start + per_page
+    sliced = results[start:end]
+    total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+
+    text = f"🔍 <b>Результаты поиска (Стр. {page} из {total_pages}):</b>\n\n"
+    kb_builder = InlineKeyboardBuilder()
+
+    for i, item in enumerate(sliced, start=start+1):
+        seeds = item.get("seeders", 0)
+        peers = item.get("leechers", 0)
+        size_gb = round(item.get("size", 0) / (1024**3), 2) if item.get("size") else 0
+        torrent_url = item.get("infoUrl") or item.get("comments") or item.get("guid") or "#"
+        indexer_name = e(item.get('indexer', 'Prowlarr'))
+        tracker_link = f"<a href='{torrent_url}'>{indexer_name}</a>" if torrent_url != "#" else indexer_name
+        final_title = e(clean_and_format_title(item['title'], search_query))
+
+        text += f"<b>{i}) {final_title}</b>\n"
+        text += f"{size_gb} GB | ↑ {seeds} - ↓ {peers} | {tracker_link}\n\n"
+        kb_builder.add(InlineKeyboardButton(text=f"{i}", callback_data=f"view_{i}_{page}"))
+
+    kb_builder.adjust(5)
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Пред.", callback_data=f"page_{page-1}"))
+    if end < total:
+        nav_buttons.append(InlineKeyboardButton(text="След. ➡️", callback_data=f"page_{page+1}"))
+    nav_builder = InlineKeyboardBuilder()
+    if nav_buttons:
+        nav_builder.row(*nav_buttons)
+    nav_builder.row(InlineKeyboardButton(text="🔙 В главное меню", callback_data="main_menu"))
+    kb_builder.attach(nav_builder)
+    return text, kb_builder.as_markup()
+
+def local_generate_detail_page(item, idx, page):
+    size_gb = round(item.get("size", 0) / (1024**3), 2) if item.get("size") else 0
+    torrent_url = item.get("infoUrl") or item.get("comments") or item.get("guid") or "#"
+    indexer_name = e(item.get('indexer', 'Prowlarr'))
+    tracker_link = f"<a href='{torrent_url}'>{indexer_name}</a>" if torrent_url != "#" else indexer_name
+
+    text = (f"📄 <b>Карточка раздачи №{idx}</b>\n\n"
+            f"<b>Название:</b> {e(item['title'])}\n"
+            f"<b>Размер:</b> {size_gb} GB\n"
+            f"<b>Сиды:</b> {item.get('seeders', 0)} | <b>Пиры:</b> {item.get('leechers', 0)}\n"
+            f"<b>Трекер:</b> {tracker_link}")
+
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="📥 Скачать", callback_data=f"dl_{idx}"))
+    kb.row(InlineKeyboardButton(text="🔙 Назад к списку", callback_data=f"page_{page}"))
+    return text, kb.as_markup()
+
+
+@router.message(F.text)
+async def handle_search(message: types.Message):
+    text = message.text.strip()
+    if text in MENU_BUTTONS or text.startswith("/") or text.startswith("magnet:"):
+        return
+    force_search = text.startswith("!")
+    query = text[1:].strip() if force_search else text
+    if not query or len(query) < 2:
+        return
+    if not force_search:
+        if await handle_talking(message):
+            return
+
+    msg = await message.answer("⏳ Ищу...")
+    user = message.from_user
+    username = f"@{user.username}" if user.username else "no_username"
+    user_info = f"ID: {user.id} | {username} ({user.full_name})"
+
+    try:
+        prefix = "[!] " if force_search else ""
+        log.info(f"[SEARCH] {prefix}Пользователь [{user_info}] ищет: \"{query}\"")
+        raw_results = await search_prowlarr(query)
+        results = sorted(raw_results, key=lambda x: int(x.get("seeders", 0)), reverse=True)
+        search_results_cache[message.from_user.id] = {"results": results, "query": query}
+        await add_query(message.from_user.id, query)
+
+        if not results:
+            await msg.edit_text("❌ Ничего не найдено.")
+            return
+
+        await msg.delete()
+        text_out, markup = local_generate_search_page(results, page=1, search_query=query)
+        await message.answer(text_out, parse_mode="HTML", reply_markup=markup,
+                             link_preview_options=LinkPreviewOptions(is_disabled=True))
+    except asyncio.TimeoutError:
+        log.warning(f"[SEARCH] Таймаут поиска для [{user_info}]: \"{query}\"")
+        try:
+            await msg.edit_text("⏱ Поиск занял слишком много времени — попробуй ещё раз.")
+        except:
+            await message.answer("⏱ Поиск занял слишком много времени — попробуй ещё раз.")
+    except Exception as ex:
+        log.error(f"[SEARCH] Ошибка поиска для [{user_info}]: {ex}", exc_info=True)
+        try:
+            await msg.edit_text(f"⚠️ Ошибка поиска:\n{str(ex)}")
+        except:
+            await message.answer(f"⚠️ Ошибка поиска:\n{str(ex)}")
+
+
+@router.callback_query(F.data.startswith("page_"))
+async def paginate(c: types.CallbackQuery):
+    page = int(c.data.split("_")[1])
+    cached = search_results_cache.get(c.from_user.id)
+    if not cached:
+        return await c.answer(SESSION_EXPIRED, show_alert=True)
+    results = cached.get("results", [])
+    query = cached.get("query")
+    text, markup = local_generate_search_page(results, page=page, search_query=query)
+    try:
+        await c.message.edit_text(text, reply_markup=markup, parse_mode="HTML",
+                                  link_preview_options=LinkPreviewOptions(is_disabled=True))
+    except Exception:
+        await c.answer()
+
+
+@router.callback_query(F.data.startswith("view_"))
+async def view_item(c: types.CallbackQuery):
+    _, idx, page = c.data.split("_")
+    cached = search_results_cache.get(c.from_user.id)
+    if not cached:
+        return await c.answer(SESSION_EXPIRED, show_alert=True)
+    results = cached.get("results", [])
+    if int(idx) > len(results):
+        return await c.answer(SESSION_EXPIRED, show_alert=True)
+
+    item = results[int(idx) - 1]
+    item_year = item.get('year')
+    if not item_year and item.get('publishDate'):
+        item_year = item['publishDate'][:4]
+    if not item_year:
+        match = re.search(r'\((\d{4})\)', item['title'])
+        if match:
+            item_year = match.group(1)
+
+    try:
+        meta = await get_movie_metadata(item['title'], year=str(item_year) if item_year else None)
+    except Exception as ex:
+        log.error(f"[SEARCH] Ошибка TMDB: {ex}")
+        meta = None
+
+    text, markup = local_generate_detail_page(item, idx, page)
+    if meta:
+        overview = e(meta.get('overview', ''))
+        if len(overview) > 700:
+            overview = overview[:700] + "..."
+        text += (f"\n\n🎬 <b>{e(meta.get('title', 'Без названия'))}</b> "
+                 f"({e(meta.get('release', '')[:4])})\n\n"
+                 f"ℹ️ <b>Описание:</b>\n<i>{overview}</i>")
+
+    try:
+        await c.message.edit_text(text, reply_markup=markup, parse_mode="HTML",
+                                  link_preview_options=LinkPreviewOptions(is_disabled=True))
+    except Exception:
+        await c.answer()
+
+
+@router.callback_query(F.data.startswith("dl_"))
+async def download_torrent_callback(c: types.CallbackQuery):
+    parts = c.data.split("_")
+    idx = int(parts[1])
+
+    cached = search_results_cache.get(c.from_user.id)
+    if not cached:
+        return await c.answer(SESSION_EXPIRED, show_alert=True)
+    results = cached.get("results", [])
+    if idx > len(results):
+        return await c.answer(SESSION_EXPIRED, show_alert=True)
+
+    item = results[idx - 1]
+    torrent_url = item.get("downloadUrl") or item.get("magnetUrl")
+    title = item.get("title", "Unknown")
+
+    if not torrent_url:
+        return await c.answer("❌ Ссылка на скачивание не найдена.", show_alert=True)
+
+    await c.message.edit_text(
+        f"⏳ <b>Получаю торрент...</b>\n\n📦 {e(title[:50])}",
+        parse_mode="HTML"
+    )
+
+    try:
+        from services.qbittorrent import qb
+        result = await qb.add_magnet(torrent_url, paused=True)
+
+        if result == "duplicate":
+            torrents = await qb.torrents()
+            found = None
+            title_lower = title.lower()
+            for t in torrents:
+                t_name = t.get("name", "").lower()
+                if t_name[:40] in title_lower or title_lower[:40] in t_name:
+                    found = t
+                    break
+            if found:
+                progress = int(found.get("progress", 0) * 100)
+                eta = found.get("eta", -1)
+                if eta == 8640000 or eta < 0:
+                    eta_str = "∞"
+                elif eta >= 3600:
+                    eta_str = f"{eta // 3600}ч {(eta % 3600) // 60}м"
+                elif eta >= 60:
+                    eta_str = f"{eta // 60}м"
+                else:
+                    eta_str = f"{eta}с"
+                state_map = {
+                    "downloading": "⬇️ Загружается", "stalledDL": "⏸ Ожидание пиров",
+                    "uploading": "⬆️ Раздаётся", "pausedDL": "⏸ На паузе",
+                    "pausedUP": "✅ Завершён", "queuedDL": "🕐 В очереди",
+                    "checkingDL": "🔍 Проверка", "metaDL": "🔎 Загрузка метаданных",
+                }
+                state_str = state_map.get(found.get("state", ""), f"❓ {found.get('state', '')}")
+                await c.message.edit_text(
+                    f"⚠️ <b>Торрент уже в списке!</b>\n\n"
+                    f"📦 {e(found['name'][:45])}\n"
+                    f"📊 {state_str} | 🔄 {progress}% | ⏱ {eta_str}",
+                    parse_mode="HTML"
+                )
+            else:
+                await c.message.edit_text("⚠️ Торрент уже добавлен в qBittorrent.", parse_mode="HTML")
+            return
+
+        if not result:
+            await c.message.edit_text("❌ qBittorrent отклонил добавление торрента.", parse_mode="HTML")
+            return
+
+        # Получаем hash
+        if isinstance(result, str) and len(result) == 40:
+            hash_id = result.lower()
+        else:
+            hash_id = None
+            for _ in range(15):
+                await asyncio.sleep(1)
+                try:
+                    torrents = await qb.torrents()
+                    title_lower = title.lower()
+                    for t in torrents:
+                        t_name = t.get("name", "").lower()
+                        if t_name[:40] in title_lower or title_lower[:40] in t_name:
+                            hash_id = t.get("hash", "").lower()
+                            break
+                    if hash_id:
+                        break
+                except Exception:
+                    pass
+
+        if not hash_id:
+            await c.message.edit_text(
+                f"✅ <b>Добавлено на паузе!</b>\n\n"
+                f"📦 {e(title[:50])}\n"
+                f"⚠️ Не удалось отследить хеш — категорию и запуск установите вручную.",
+                parse_mode="HTML"
+            )
+            return
+
+        # Сохраняем pending с автокатегорией, торрент на паузе
+        auto_cat = detect_category(title)
+        pending_choices[c.from_user.id] = {
+            "hash": hash_id,
+            "cat": auto_cat,
+            "notify": None,
+            "title": title,
+        }
+
+        log.info(f"[SEARCH] {c.from_user.id} добавил на паузе: {title[:40]} | hash={hash_id[:8]}...")
+
+        await c.message.edit_text(
+            f"⏸ <b>Торрент на паузе.</b> Выбери параметры и подтверди запуск:\n\n"
+            f"📦 {e(title[:50])}",
+            reply_markup=build_choice_keyboard(c.from_user.id),
+            parse_mode="HTML"
+        )
+
+    except Exception as ex:
+        log.error(f"[SEARCH] Ошибка добавления торрента: {ex}", exc_info=True)
+        try:
+            await c.message.edit_text(f"❌ Ошибка: {str(ex)[:100]}", parse_mode="HTML")
+        except:
+            pass
+
+
+@router.callback_query(F.data.startswith("choice_"))
+async def handle_choice(c: types.CallbackQuery):
+    uid = c.from_user.id
+    action = c.data
+
+    if action == "choice_noop":
+        return await c.answer("Выбери категорию и уведомление", show_alert=False)
+
+    if uid not in pending_choices and action not in ("choice_cancel",):
+        return await c.answer(SESSION_EXPIRED, show_alert=True)
+
+    if action == "choice_cancel":
+        choice = pending_choices.pop(uid, {})
+        hash_id = choice.get("hash")
+        title = choice.get("title", "")
+        if hash_id:
+            try:
+                from services.qbittorrent import qb
+                await qb.delete_torrent(hashes=hash_id, delete_files=True)
+                log.info(f"[SEARCH] {uid} отменил — торрент удалён: {title[:40]}")
+            except Exception as ex:
+                log.error(f"[SEARCH] Ошибка удаления при отмене: {ex}")
+        await c.message.edit_text(
+            f"❌ <b>Отменено.</b>\n\n📦 {e(title[:50])}\nТоррент удалён из qBittorrent.",
+            parse_mode="HTML"
+        )
+        return
+
+    elif action == "choice_cat_tv":
+        pending_choices[uid]["cat"] = CAT_TV
+    elif action == "choice_cat_movie":
+        pending_choices[uid]["cat"] = CAT_MOVIE
+    elif action == "choice_cat_none":
+        pending_choices[uid]["cat"] = CAT_NONE
+    elif action == "choice_notify_me":
+        pending_choices[uid]["notify"] = "me"
+    elif action == "choice_notify_all":
+        pending_choices[uid]["notify"] = "all"
+
+    elif action == "choice_confirm":
+        choice = pending_choices.pop(uid, {})
+        hash_id = choice.get("hash")
+        cat     = choice.get("cat")
+        notify  = choice.get("notify")
+        title   = choice.get("title", "Unknown")
+
+        if not hash_id:
+            return await c.answer(SESSION_EXPIRED, show_alert=True)
+
+        from services.qbittorrent import qb
+
+        # Устанавливаем категорию
+        if cat and cat != CAT_NONE:
+            try:
+                await qb.set_category(hash_id, cat)
+            except Exception as ex:
+                log.error(f"[SEARCH] Ошибка установки категории: {ex}")
+
+        # Запускаем торрент
+        await qb.resume_torrent(hash_id)
+
+        # Сохраняем в downloads
+        await save_download(hash_id, uid, title, notify)
+
+        cat_label    = "📺 Сериал" if cat == CAT_TV else "🎬 Фильм" if cat == CAT_MOVIE else "📦 Прочее"
+        notify_label = "🔔 Только тебе" if notify == "me" else "📢 Всем"
+
+        log.info(f"[SEARCH] {uid} подтвердил запуск: {title[:40]} | {cat_label} | {notify_label}")
+
+        await c.message.edit_text(
+            f"✅ <b>Закачка запущена!</b>\n\n"
+            f"📦 {e(title[:50])}\n"
+            f"📂 {cat_label} | {notify_label}\n\n"
+            f"Уведомление придёт когда скачается.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Обновляем клавиатуру
+    try:
+        await c.message.edit_reply_markup(reply_markup=build_choice_keyboard(uid))
+    except Exception:
+        pass
+    await c.answer()

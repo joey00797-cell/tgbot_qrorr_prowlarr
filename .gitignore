@@ -1,0 +1,9 @@
+.env
+app_v2/storage/users.json
+app_v2/storage/downloads.json
+app_v2/storage/history.json
+app_v2/storage/cache.json
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo

@@ -1,0 +1,97 @@
+import asyncio
+import logging
+from aiogram import Bot
+from services.qbittorrent import qb
+import storage.users as user_storage
+from storage.downloads import get_download, remove_download
+import config
+
+log = logging.getLogger("torrent_bot")
+_notified_hashes = set()
+
+async def torrent_watchdog_loop(bot: Bot):
+    log.info("[WATCHDOG] Инициализация фоновой службы слежения...")
+    await asyncio.sleep(5)
+
+    try:
+        torrents = await qb.torrents()
+        if torrents:
+            for t in torrents:
+                if float(t.get("progress", 0)) >= 1.0:
+                    _notified_hashes.add(t.get("hash"))
+            log.info(f"[WATCHDOG] Первичный проход. Пропущено старых: {len(_notified_hashes)}")
+    except Exception as e:
+        log.error(f"[WATCHDOG] Ошибка первичного прохода: {e}")
+
+    while True:
+        try:
+            torrents = await qb.torrents()
+            if torrents:
+                active = any(t.get("state") in ["downloading", "metaDL"] for t in torrents)
+                sleep_time = 15 if active else 60
+            else:
+                sleep_time = 60
+
+            for t in torrents or []:
+                progress = float(t.get("progress", 0))
+                hash_id = t.get("hash", "").lower()
+                name = t.get("name", "Unknown")
+                size_bytes = int(t.get("size", 0))
+
+                if progress >= 1.0 and hash_id not in _notified_hashes:
+                    _notified_hashes.add(hash_id)
+                    log.info(f"[WATCHDOG] ✅ Завершена загрузка: {name}")
+
+                    size_gb = round(size_bytes / (1024 ** 3), 2)
+                    dl_info = get_download(hash_id)
+
+                    if dl_info:
+                        notify     = dl_info.get("notify", "me")
+                        owner_uid  = int(dl_info.get("uid", config.ADMIN_ID))
+                        remove_download(hash_id)
+                    else:
+                        notify    = "me"
+                        owner_uid = int(config.ADMIN_ID)
+
+                    # Формируем статус уведомления
+                    notify_label = "🔔 Только тебе" if notify == "me" else "📢 Всем"
+
+                    text = (
+                        f"✅ <b>Закачка завершена!</b>\n\n"
+                        f"📦 <code>{name}</code>\n"
+                        f"💾 {size_gb} GB | {notify_label}\n\n"
+                        f"Приятного просмотра! 🎬"
+                    )
+
+                    # Собираем получателей
+                    recipients = []
+
+                    if notify == "all":
+                        try:
+                            users = user_storage.load_users()
+                            for uid, info in users.items():
+                                if info.get("status") == "active":
+                                    recipients.append(int(uid))
+                        except Exception as ex:
+                            log.error(f"[WATCHDOG] Ошибка чтения юзеров: {ex}")
+                    else:
+                        # Только владелец + всегда админ
+                        recipients.append(owner_uid)
+
+                    # Админ всегда получает уведомление
+                    admin_id = int(config.ADMIN_ID)
+                    if admin_id not in recipients:
+                        recipients.append(admin_id)
+
+                    for chat_id in recipients:
+                        try:
+                            await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+                            await asyncio.sleep(0.05)
+                        except Exception:
+                            pass
+
+        except Exception as e:
+            log.error(f"[WATCHDOG] Ошибка: {e}")
+            sleep_time = 30
+
+        await asyncio.sleep(sleep_time)

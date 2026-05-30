@@ -1,0 +1,4 @@
+app_v2/storage
+app_v2/**/__pycache__
+app_v2/**/*.pyc
+.env
