@@ -124,17 +124,14 @@ async def search(query: str):
                 raise Exception(f"Prowlarr error {response.status}: {body}")
             data = await response.json()
 
-    # Фильтр по словам
-    filtered = [item for item in data if _matches_query(item.get("title", ""), clean_query)]
-
     # Фильтр по сезону
     if season is not None:
-        filtered_season = [item for item in filtered if _season_in_title(item.get("title", ""), season)]
-        filtered = filtered_season if filtered_season else filtered
+        filtered_season = [item for item in data if _season_in_title(item.get("title", ""), season)]
+        data = filtered_season if filtered_season else data
 
     # Фильтр по озвучке
     if voice is not None:
-        filtered_voice = [item for item in filtered if _voice_in_title(item.get("title", ""), voice)]
-        filtered = filtered_voice if filtered_voice else filtered
+        filtered_voice = [item for item in data if _voice_in_title(item.get("title", ""), voice)]
+        data = filtered_voice if filtered_voice else data
 
-    return filtered if filtered else data
+    return data

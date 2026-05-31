@@ -153,10 +153,13 @@ async def handle_search(message: types.Message):
     user_info = f"ID: {user.id} | {username} ({user.full_name})"
 
     try:
+        import time as _time
         prefix = "[!] " if force_search else ""
-        log.info(f"[SEARCH] {prefix}Пользователь [{user_info}] ищет: \"{query}\"")
+        _t = _time.time()
         raw_results = await search_prowlarr(query)
+        _ms = int((_time.time() - _t) * 1000)
         results = sorted(raw_results, key=lambda x: int(x.get("seeders", 0)), reverse=True)
+        log.info(f"[SEARCH] {prefix}{user_info} | \"{query}\" → {len(results)} results | {_ms}ms")
         search_results_cache[message.from_user.id] = {"results": results, "query": query}
         await add_query(message.from_user.id, query)
 
@@ -250,13 +253,16 @@ async def download_torrent_callback(c: types.CallbackQuery):
     results = cached.get("results", [])
     if idx > len(results):
         return await c.answer(SESSION_EXPIRED, show_alert=True)
-
     item = results[idx - 1]
     torrent_url = item.get("downloadUrl") or item.get("magnetUrl")
     title = item.get("title", "Unknown")
+    indexer = item.get("indexer", "unknown")
+    url_type = "magnet" if (item.get("magnetUrl") and not item.get("downloadUrl")) else "torrent"
 
     if not torrent_url:
         return await c.answer("❌ Ссылка на скачивание не найдена.", show_alert=True)
+
+    log.info(f"[DL] {c.from_user.id} | {indexer} | {url_type} | {title[:40]}")
 
     await c.message.edit_text(
         f"⏳ <b>Получаю торрент...</b>\n\n📦 {e(title[:50])}",

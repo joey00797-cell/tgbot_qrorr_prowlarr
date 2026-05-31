@@ -77,11 +77,14 @@ async def hist_pick(c: types.CallbackQuery):
     if idx >= len(history):
         return await c.answer("Запись не найдена.", show_alert=True)
     query = history[idx]
-    log.info(f"[HISTORY] {c.from_user.id} повторяет поиск: \"{query}\"")
+    import time as _time
     await c.message.edit_text(f"⏳ Ищу: <i>{query}</i>...", parse_mode="HTML")
     try:
+        _t = _time.time()
         raw_results = await search_prowlarr(query)
+        _ms = int((_time.time() - _t) * 1000)
         results = sorted(raw_results, key=lambda x: int(x.get("seeders", 0)), reverse=True)
+        log.info(f"[HISTORY] {c.from_user.id} | \"{query}\" → {len(results)} results | {_ms}ms")
         search_results_cache[c.from_user.id] = {"results": results, "query": query}
         if not results:
             await c.message.edit_text("❌ Ничего не найдено.")

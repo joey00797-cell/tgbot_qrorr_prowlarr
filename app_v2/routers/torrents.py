@@ -224,19 +224,32 @@ async def qbit_global_resume(c: types.CallbackQuery):
         await c.answer(f"Ошибка: {e}", show_alert=True)
 
 @router.callback_query(F.data.startswith("qbit_manage_"))
-async def qbit_manage_torrent(c: types.CallbackQuery):
-    t_hash = c.data.split("_")[2]
+async def qbit_manage_torrent(c: types.CallbackQuery, t_hash: str = None):
+    if t_hash is None:
+        t_hash = c.data.split("_")[2]
     try:
+        from storage.downloads import get_download, save_download
         torrents = await qb.torrents()
         target_t = next((t for t in torrents if t.get("hash") == t_hash), None)
         if not target_t:
             return await c.answer("⚠️ Торрент не найден.", show_alert=True)
         name = target_t.get("name")
+        progress = int(target_t.get("progress", 0) * 100)
+        subscribed = get_download(t_hash.lower()) is not None
+
         kb = InlineKeyboardBuilder()
         kb.row(
             types.InlineKeyboardButton(text="⏸ Пауза", callback_data=f"qbit_op_pause_{t_hash}"),
             types.InlineKeyboardButton(text="▶️ Запуск", callback_data=f"qbit_op_resume_{t_hash}")
         )
+        if progress < 100:
+            if subscribed:
+                kb.row(
+                    types.InlineKeyboardButton(text="🔔 Подписан ✓", callback_data="qbit_noop"),
+                    types.InlineKeyboardButton(text="🔕 Отписаться", callback_data=f"qbit_op_unsub_{t_hash}"),
+                )
+            else:
+                kb.row(types.InlineKeyboardButton(text="🔔 Подписаться на уведомление", callback_data=f"qbit_op_sub_{t_hash}"))
         kb.row(types.InlineKeyboardButton(text="❌ Удалить торрент", callback_data=f"qbit_op_delete_{t_hash}"))
         kb.row(types.InlineKeyboardButton(text="🔙 Назад к списку", callback_data="qbit_page_1"))
         await c.message.edit_text(
@@ -245,6 +258,11 @@ async def qbit_manage_torrent(c: types.CallbackQuery):
         )
     except Exception as e:
         await c.answer(f"Ошибка: {e}", show_alert=True)
+
+@router.callback_query(F.data == "qbit_noop")
+async def qbit_noop(c: types.CallbackQuery):
+    await c.answer()
+
 
 @router.callback_query(F.data.startswith("qbit_op_"))
 async def qbit_execute_op(c: types.CallbackQuery):
@@ -262,9 +280,22 @@ async def qbit_execute_op(c: types.CallbackQuery):
             await qb.delete_torrent(hashes=t_hash, delete_files=True)
             await c.answer("Торрент удален с диска", show_alert=True)
             return await send_status_dashboard(c, page=1, is_callback=True)
-        await qbit_manage_torrent(c)
+        elif op == "sub":
+            from storage.downloads import save_download
+            torrents = await qb.torrents()
+            target_t = next((t for t in torrents if t.get("hash") == t_hash), None)
+            title = target_t.get("name", "Unknown") if target_t else "Unknown"
+            await save_download(t_hash.lower(), c.from_user.id, title, "me")
+            await c.answer("🔔 Подписан на уведомление")
+            return await qbit_manage_torrent(c, t_hash)
+        elif op == "unsub":
+            from storage.downloads import remove_download
+            remove_download(t_hash.lower())
+            await c.answer("🔕 Отписался от уведомления")
+            return await qbit_manage_torrent(c, t_hash)
+        await qbit_manage_torrent(c, t_hash)
     except Exception as e:
-        await c.answer(f"Ошибка: {e}", show_alert=True)
+        await c.answer("Ошибка операции", show_alert=True)
 
 
 # =========================================================
