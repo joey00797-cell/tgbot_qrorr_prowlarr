@@ -47,7 +47,7 @@ def sort_torrents(torrents):
         state = t.get("state", "")
         progress = t.get("progress", 0)
         if state in ['downloading', 'metaDL']: return 0
-        elif state in ['stalledDL', 'pausedDL', 'stoppedDL'] and progress < 1.0: return 1
+        elif state in ['stalledDL', 'pausedDL', 'stoppedDL', 'checkingDL', 'checkingUP'] and progress < 1.0: return 1
         elif state in ['uploading', 'stalledUP', 'queuedUP']: return 2
         return 3
     # Внутри каждой группы — свежедобавленные первые
@@ -229,6 +229,7 @@ async def qbit_manage_torrent(c: types.CallbackQuery, t_hash: str = None):
         t_hash = c.data.split("_")[2]
     try:
         from storage.downloads import get_download, save_download
+        from storage.watchlist import get_watch, add_watch, remove_watch
         torrents = await qb.torrents()
         target_t = next((t for t in torrents if t.get("hash") == t_hash), None)
         if not target_t:
@@ -236,6 +237,7 @@ async def qbit_manage_torrent(c: types.CallbackQuery, t_hash: str = None):
         name = target_t.get("name")
         progress = int(target_t.get("progress", 0) * 100)
         subscribed = get_download(t_hash.lower()) is not None
+        watching = get_watch(t_hash.lower()) is not None
 
         kb = InlineKeyboardBuilder()
         kb.row(
@@ -250,6 +252,13 @@ async def qbit_manage_torrent(c: types.CallbackQuery, t_hash: str = None):
                 )
             else:
                 kb.row(types.InlineKeyboardButton(text="🔔 Подписаться на уведомление", callback_data=f"qbit_op_sub_{t_hash}"))
+        if watching:
+            kb.row(
+                types.InlineKeyboardButton(text="🔄 Слежу ✓", callback_data="qbit_noop"),
+                types.InlineKeyboardButton(text="⏹ Не следить", callback_data=f"qbit_op_unwatch_{t_hash}"),
+            )
+        else:
+            kb.row(types.InlineKeyboardButton(text="🔄 Следить за обновлениями", callback_data=f"qbit_op_watch_{t_hash}"))
         kb.row(types.InlineKeyboardButton(text="❌ Удалить торрент", callback_data=f"qbit_op_delete_{t_hash}"))
         kb.row(types.InlineKeyboardButton(text="🔙 Назад к списку", callback_data="qbit_page_1"))
         await c.message.edit_text(
@@ -293,6 +302,20 @@ async def qbit_execute_op(c: types.CallbackQuery):
             remove_download(t_hash.lower())
             await c.answer("🔕 Отписался от уведомления")
             return await qbit_manage_torrent(c, t_hash)
+        elif op == "watch":
+            from storage.watchlist import add_watch
+            torrents = await qb.torrents()
+            target_t = next((t for t in torrents if t.get("hash") == t_hash), None)
+            title = target_t.get("name", "Unknown") if target_t else "Unknown"
+            size = target_t.get("size", 0) if target_t else 0
+            await add_watch(t_hash.lower(), c.from_user.id, title, size)
+            await c.answer("🔄 Слежу за обновлениями")
+            return await qbit_manage_torrent(c, t_hash)
+        elif op == "unwatch":
+            from storage.watchlist import remove_watch
+            await remove_watch(t_hash.lower())
+            await c.answer("⏹ Слежение отключено")
+            return await qbit_manage_torrent(c, t_hash)
         await qbit_manage_torrent(c, t_hash)
     except Exception as e:
         await c.answer("Ошибка операции", show_alert=True)
@@ -301,6 +324,69 @@ async def qbit_execute_op(c: types.CallbackQuery):
 # =========================================================
 # ПРИЕМ ССЫЛОК И ФАЙЛОВ
 # =========================================================
+
+@router.callback_query(F.data.startswith("watch_"))
+@router.callback_query(F.data.startswith("watch_"))
+async def handle_watch_action(c: types.CallbackQuery):
+    parts = c.data.split("_")
+    action = parts[1]
+    hash_id = parts[2]
+
+    if action == "stop":
+        from storage.watchlist import remove_watch
+        await remove_watch(hash_id)
+        try:
+            await c.message.edit_text(
+                c.message.text + "\n\n\u23f9 <i>Слежение отключено.</i>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            await c.answer("\u23f9 Слежение отключено")
+        return
+
+    if action == "update":
+        from storage.watchlist import get_watch, remove_watch
+        from services.prowlarr import search as search_prowlarr
+        info = get_watch(hash_id)
+        if not info:
+            return await c.answer("Данные устарели.", show_alert=True)
+
+        title = info.get("title", "")
+        clean_title = title.split("(")[0].replace("(обновляемая)", "").strip()
+
+        await c.message.edit_text(
+            f"\u23f3 <b>Ищу обновление...</b>\n\n\U0001f4e6 {title[:50]}",
+            parse_mode="HTML"
+        )
+
+        try:
+            results = await search_prowlarr(clean_title)
+            if not results:
+                await c.message.edit_text("\u274c Раздача не найдена в Prowlarr.", parse_mode="HTML")
+                return
+
+            best = max(results, key=lambda x: x.get("size", 0))
+            await qb.delete_torrent(hashes=hash_id, delete_files=False)
+            await remove_watch(hash_id)
+
+            torrent_url = best.get("downloadUrl") or best.get("magnetUrl")
+            await qb.add_magnet(torrent_url, paused=True)
+
+            new_title = best.get("title", title)
+            size_gb = round(best.get("size", 0) / (1024**3), 2)
+
+            await c.message.edit_text(
+                f"\u2705 <b>Раздача обновлена!</b>\n\n"
+                f"\U0001f4e6 {new_title[:50]}\n"
+                f"\U0001f4be {size_gb} GB\n\n"
+                f"Торрент добавлен на паузу — запусти вручную в дашборде.",
+                parse_mode="HTML"
+            )
+            log.info(f"[WATCH] {c.from_user.id} обновил раздачу: {title[:40]}")
+        except Exception as ex:
+            log.error(f"[WATCH] Ошибка обновления: {ex}")
+            await c.message.edit_text(f"\u274c Ошибка обновления: {str(ex)[:100]}", parse_mode="HTML")
+
 
 @router.message(F.text.startswith("magnet:?"))
 async def add_magnet_torrent(message: types.Message):

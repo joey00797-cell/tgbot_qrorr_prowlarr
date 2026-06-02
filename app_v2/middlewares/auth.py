@@ -54,4 +54,10 @@ class AuthMiddleware(BaseMiddleware):
             log.warning(f"[AUTH] {uid} {username} | BLOCKED | {payload} | {duration}ms")
             return
 
-        return await handler(event, data)
+        result = await handler(event, data)
+        duration = int((time.time() - start) * 1000)
+        # Логируем только медленные запросы (>500ms) или cb/text события
+        if duration > 500:
+            payload = repr(cb[:30]) if cb else repr(text[:40]) if text else "''"
+            log.warning(f"[SLOW] {uid} {username} | {payload} | {duration}ms")
+        return result

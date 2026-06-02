@@ -43,6 +43,13 @@ class QBittorrentClient:
                         break
         except Exception as e:
             self.cookie = None
+            # Закрываем битую сессию чтобы пересоздать при следующем запросе
+            try:
+                if self.session and not self.session.closed:
+                    await self.session.close()
+            except Exception:
+                pass
+            self.session = None
             log.error(f"[QBIT] Connection error during login: {e}")
             raise e
 

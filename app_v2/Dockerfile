@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.5
 FROM python:3.11-slim
 WORKDIR /app
 COPY app_v2/requirements.txt .
