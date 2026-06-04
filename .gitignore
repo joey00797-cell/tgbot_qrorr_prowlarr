@@ -7,3 +7,8 @@ __pycache__/
 **/__pycache__/
 *.pyc
 *.pyo
+*.db
+fix.py
+fix_bootstrap.py
+merge_bot.py
+all_bot_code.txt
