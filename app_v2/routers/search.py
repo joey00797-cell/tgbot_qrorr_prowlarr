@@ -9,7 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from routers.talker import handle_talking
 from services.prowlarr import search as search_prowlarr
 from services.metadata import get_movie_metadata
-from storage.downloads import save_download
+from storage.downloads import save_download, find_similar_downloads
 from storage.history import add_query
 from storage.watchlist import add_watch, get_watch
 import config as _config
@@ -19,6 +19,7 @@ log = logging.getLogger("torrent_bot")
 
 search_results_cache = {}  # uid -> {"results": [...], "query": "..."}
 pending_choices = {}        # uid -> {"hash": ..., "cat": ..., "notify": ..., "title": ...}
+meta_cache = {}             # uid -> {"tmdb_title": ..., "tmdb_title_ru": ...}
 
 MENU_BUTTONS = {
     "📊 Статус закачек",
@@ -123,7 +124,7 @@ def local_generate_search_page(results, page=1, per_page=5, search_query=None):
     kb_builder.attach(nav_builder)
     return text, kb_builder.as_markup()
 
-def local_generate_detail_page(item, idx, page):
+def local_generate_detail_page(item, idx, page, similar=None):
     size_gb = round(item.get("size", 0) / (1024**3), 2) if item.get("size") else 0
     torrent_url = item.get("infoUrl") or item.get("comments") or item.get("guid") or "#"
     indexer_name = e(item.get('indexer', 'Prowlarr'))
@@ -135,9 +136,15 @@ def local_generate_detail_page(item, idx, page):
             f"<b>Сиды:</b> {item.get('seeders', 0)} | <b>Пиры:</b> {item.get('leechers', 0)}\n"
             f"<b>Трекер:</b> {tracker_link}")
 
+    if similar:
+        matches = ", ".join(m["title"][:40] + " (" + str(m["similarity"]) + "%)" for m in similar[:2])
+        text += "\n\n⚠️ <b>Похожее уже есть в базе:</b> " + matches
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="📥 Скачать", callback_data=f"dl_{idx}"))
-    kb.row(InlineKeyboardButton(text="🔙 Назад к списку", callback_data=f"page_{page}"))
+    kb.row(
+        InlineKeyboardButton(text="🔙 Назад к списку", callback_data=f"page_{page}"),
+        InlineKeyboardButton(text="📊 Статус закачек", callback_data="qbit_page_1"),
+    )
     return text, kb.as_markup()
 
 
@@ -238,10 +245,14 @@ async def view_item(c: types.CallbackQuery):
         log.error(f"[SEARCH] Ошибка TMDB: {ex}")
         meta = None
 
-    text, markup = local_generate_detail_page(item, idx, page)
+    similar = await find_similar_downloads(item.get("title", ""))
+    text, markup = local_generate_detail_page(item, idx, page, similar=similar)
     poster_url = None
 
     if meta:
+        meta_cache[c.from_user.id] = {
+            "tmdb_title": meta.get("title", ""),
+        }
         overview = e(meta.get('overview', ''))
         if len(overview) > 700:
             overview = overview[:700] + "..."
@@ -278,9 +289,6 @@ async def view_item(c: types.CallbackQuery):
         else:
             await c.message.edit_text(text, reply_markup=markup, parse_mode="HTML",
                                       link_preview_options=LinkPreviewOptions(is_disabled=True))
-    except Exception:
-        await c.answer()
-        await c.answer()
 
 
 @router.callback_query(F.data.startswith("dl_"))
@@ -394,11 +402,13 @@ async def download_torrent_callback(c: types.CallbackQuery):
         # Сохраняем pending с автокатегорией, торрент на паузе
         auto_cat = detect_category(title)
         auto_watch = "(обновляемая)" in title.lower()
+        _meta = meta_cache.get(c.from_user.id, {})
         pending_choices[c.from_user.id] = {
             "hash": hash_id,
             "cat": auto_cat,
             "notify": None,
             "title": title,
+            "tmdb_title": _meta.get("tmdb_title", ""),
             "watch": auto_watch,
         }
 
@@ -523,11 +533,42 @@ async def handle_choice(c: types.CallbackQuery):
             except Exception as ex:
                 log.error(f"[SEARCH] Ошибка установки категории: {ex}")
 
+        # Проверяем дубли по названию
+        similar = await find_similar_downloads(title)
+        if similar:
+            pending_choices[uid] = choice
+            kb_dup = InlineKeyboardBuilder()
+            kb_dup.row(
+                InlineKeyboardButton(text="✅ Всё равно добавить", callback_data="choice_confirm_force"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="choice_cancel"),
+            )
+            matches = '\n'.join('  • ' + m['title'][:50] + ' (' + str(m['similarity']) + '%)' for m in similar[:3])
+            await c.message.edit_text(
+                "<b>⚠️ Похожий торрент уже есть в базе:</b>\n\n" + matches + "\n\nВсё равно запустить <b>" + e(title[:40]) + "</b>?",
+                reply_markup=kb_dup.as_markup(),
+                parse_mode="HTML"
+            )
+            return
+
         # Запускаем торрент
         await qb.resume_torrent(hash_id)
 
         # Сохраняем в downloads
-        await save_download(hash_id, uid, title, notify)
+        await save_download(hash_id, uid, title, notify, tmdb_title=choice.get("tmdb_title", ""))
+
+        # Уведомляем админа о начале закачки
+        if uid != int(_config.ADMIN_ID):
+            from storage.users import get_user
+            user_data = get_user(uid)
+            uname = user_data.get("username", str(uid)) if user_data else str(uid)
+            try:
+                await c.bot.send_message(
+                    chat_id=int(_config.ADMIN_ID),
+                    text="📥 Новая закачка\n👤 @" + uname + " (id: " + str(uid) + ")\n📦 " + title[:60],
+                )
+            except Exception:
+                pass
+
 
         # Сохраняем в watchlist если выбрано слежение
         if choice.get("watch"):
@@ -561,3 +602,12 @@ async def handle_choice(c: types.CallbackQuery):
     except Exception:
         pass
     await c.answer()
+
+
+@router.callback_query(F.data == "choice_confirm_force")
+async def choice_confirm_force(c: types.CallbackQuery):
+    uid = c.from_user.id
+    if uid not in pending_choices:
+        return await c.answer("⏰ Сессия устарела", show_alert=True)
+    c.data = "choice_confirm"
+    await handle_choice(c)

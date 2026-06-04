@@ -10,7 +10,6 @@ log = logging.getLogger("torrent_bot")
 async def main():
     log.info("ENTRYPOINT START")
     bot, dp = create_app()
-    log.info("Bot started")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

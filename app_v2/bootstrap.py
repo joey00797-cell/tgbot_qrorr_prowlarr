@@ -5,6 +5,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config.settings import TELEGRAM_TOKEN
 from middlewares.auth import AuthMiddleware
 from services.watchdog import torrent_watchdog_loop
+from storage.database import init_db
 import routers.menu as menu_module
 import routers.torrents as torrents_module
 import routers.search as search_module
@@ -14,8 +15,16 @@ import routers.history as history_module
 log = logging.getLogger("torrent_bot")
 
 async def on_startup(bot: Bot):
+    log.info("🚀 Начинаю инициализацию системных служб...")
+    try:
+        await init_db()
+        log.info("  ├── [ OK ]   База данных SQLite      🗄️ (storage/bot.db)")
+    except Exception as e:
+        log.error(f"  ├── [ERROR]  Ошибка базы данных: {e}")
+        
     asyncio.create_task(torrent_watchdog_loop(bot))
-    log.info("✅ Watchdog запущен!")
+    log.info("  ├── [ OK ]   Служба Watchdog запущен  🛰️ (services/watchdog.py)")
+    log.info("  └── [SUCCESS] Бот успешно запущен и готов к работе! 🤖")
 
 def register_all_routers(dp: Dispatcher):
     log.info("🚀 Начинаю загрузку компонентов и роутеров...")
@@ -32,12 +41,12 @@ def register_all_routers(dp: Dispatcher):
             log.info(f"  ├── [LOADED] {name:<23} 📦 ({mod_name}.py)")
         except Exception as e:
             log.error(f"  └── [ERROR]  Ошибка загрузки модуля {name}: {e}")
-    log.info("✅ Все модули успешно привязаны к диспетчеру aiogram!")
+    log.info("✅ Все роутеры успешно привязаны к диспетчеру aiogram!")
 
 def create_app():
     bot = Bot(token=TELEGRAM_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.update.outer_middleware(AuthMiddleware())
-    dp.startup.register(on_startup)
     register_all_routers(dp)
+    dp.startup.register(on_startup)
     return bot, dp

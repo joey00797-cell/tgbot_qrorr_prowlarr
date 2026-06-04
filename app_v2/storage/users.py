@@ -50,3 +50,12 @@ async def update_user(user_id: int, updates: dict):
             users[uid] = {}
         users[uid].update(updates)
         save_users(users)
+
+def get_all_active_users() -> list:
+    """Возвращает список всех активных пользователей как список dict."""
+    users = load_users()
+    result = []
+    for uid_str, data in users.items():
+        if data.get("status") == "active":
+            result.append({"user_id": int(uid_str), **data})
+    return result

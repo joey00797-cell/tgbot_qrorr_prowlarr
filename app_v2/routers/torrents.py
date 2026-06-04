@@ -56,47 +56,52 @@ def sort_torrents(torrents):
 def format_status_page(torrents_list, global_info, page=1, per_page=10):
     if not torrents_list:
         return "📥 <b>В qBittorrent сейчас нет торрентов.</b>", False, 0
-
     sorted_torrents = sort_torrents(torrents_list)
     total_count = len(sorted_torrents)
     start = (page - 1) * per_page
     end = start + per_page
-    page_torrents = sorted_torrents[start:end]
-
+    total_pages = (total_count + per_page - 1) // per_page
     dl_total = round(global_info.get("dl_info_speed", 0) / 1024 / 1024, 2)
     up_total = round(global_info.get("up_info_speed", 0) / 1024 / 1024, 2)
-
-    msg = f"📊 <b>Мониторинг qBittorrent (Стр. {page})</b>\n"
-    msg += f"📥 {dl_total} МБ/с | 📤 {up_total} МБ/с | Всего: <code>{total_count}</code>\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-    for i, t in enumerate(page_torrents, start=start + 1):
-        progress = t.get("progress", 0)
-        progress_pct = round(progress * 100, 1)
-        p_bar = make_progress_bar(progress)
-        dl_speed = round(t.get("dlspeed", 0) / 1024 / 1024, 2)
-        size_gb = round(t.get("size", 0) / 1024 / 1024 / 1024, 2)
-        state = t.get("state", "")
-        status_text = get_readable_state(state, progress)
-        name = t.get("name", "unknown")
-
-        msg += f"<b>{i})</b> <b>{name[:38]}...</b>\n"
-        msg += f" └ <code>[{p_bar}]</code> <b>{progress_pct}%</b> | <code>{size_gb} ГБ</code>\n"
-        msg += f" └ {status_text}"
-
-        if t.get("dlspeed", 0) > 0 and state in ['downloading', 'metaDL']:
-            msg += f" | ⬇️ {dl_speed} МБ/с | ⏱ {format_eta(t.get('eta', -1))}"
-
-        msg += "\n────────────────────────\n"
-
+    msg = f"📊 <b>Мониторинг qBittorrent</b> (стр. {page}/{total_pages})\n"
+    msg += f"⬇️ {dl_total} МБ/с | ⬆️ {up_total} МБ/с | Всего: <code>{total_count}</code>\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━━━━━"
     return msg, True, total_count
+
+
+def _torrent_btn_label(t: dict) -> str:
+    state = t.get("state", "")
+    progress = t.get("progress", 0)
+    progress_pct = int(progress * 100)
+    name = t.get("name", "unknown")
+
+    if state in ["downloading", "metaDL"]:
+        dl_speed = round(t.get("dlspeed", 0) / 1024 / 1024, 2)
+        icon = "⬇️"
+        suffix = f" {progress_pct}% {dl_speed}МБ/с"
+    elif state in ["stalledDL"]:
+        icon = "⏳"
+        suffix = f" {progress_pct}%"
+    elif state in ["pausedDL", "stoppedDL"] and progress < 1.0:
+        icon = "⏸"
+        suffix = f" {progress_pct}%"
+    elif state in ["checkingDL", "checkingUP"]:
+        icon = "🔍"
+        suffix = f" {progress_pct}%"
+    elif state in ["uploading", "stalledUP", "queuedUP", "pausedUP"]:
+        icon = "✅"
+        suffix = ""
+    else:
+        icon = "⚙️"
+        suffix = f" {progress_pct}%"
+
+    max_name = 28 - len(suffix)
+    short_name = name[:max_name] + ("…" if len(name) > max_name else "")
+    return f"{icon} {short_name}{suffix}"
+
 
 def build_status_keyboard(torrents_list, page=1, per_page=10):
     kb = InlineKeyboardBuilder()
-    kb.row(
-        types.InlineKeyboardButton(text="⏸ Пауза всех", callback_data="qbit_global_pause"),
-        types.InlineKeyboardButton(text="▶️ Старт всех", callback_data="qbit_global_resume")
-    )
 
     if torrents_list:
         sorted_torrents = sort_torrents(torrents_list)
@@ -105,13 +110,12 @@ def build_status_keyboard(torrents_list, page=1, per_page=10):
         page_torrents = sorted_torrents[start:end]
         total_count = len(sorted_torrents)
 
-        num_builder = InlineKeyboardBuilder()
-        for i, t in enumerate(page_torrents, start=start + 1):
-            num_builder.add(types.InlineKeyboardButton(
-                text=str(i), callback_data=f"qbit_manage_{t.get('hash', '')}"
+        for t in page_torrents:
+            label = _torrent_btn_label(t)
+            kb.row(types.InlineKeyboardButton(
+                text=label,
+                callback_data=f"qbit_manage_{t.get('hash', '')}"
             ))
-        num_builder.adjust(5)
-        kb.attach(num_builder)
 
         nav = []
         if page > 1:
@@ -121,6 +125,10 @@ def build_status_keyboard(torrents_list, page=1, per_page=10):
         if nav:
             kb.row(*nav)
 
+    kb.row(
+        types.InlineKeyboardButton(text="⏸ Пауза всех", callback_data="qbit_global_pause"),
+        types.InlineKeyboardButton(text="▶️ Старт всех", callback_data="qbit_global_resume")
+    )
     kb.row(
         types.InlineKeyboardButton(text="🔄 Обновить", callback_data=f"qbit_page_{page}"),
         types.InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")
@@ -236,7 +244,7 @@ async def qbit_manage_torrent(c: types.CallbackQuery, t_hash: str = None):
             return await c.answer("⚠️ Торрент не найден.", show_alert=True)
         name = target_t.get("name")
         progress = int(target_t.get("progress", 0) * 100)
-        subscribed = get_download(t_hash.lower()) is not None
+        subscribed = (await get_download(t_hash.lower())) is not None
         watching = get_watch(t_hash.lower()) is not None
 
         kb = InlineKeyboardBuilder()
@@ -299,7 +307,7 @@ async def qbit_execute_op(c: types.CallbackQuery):
             return await qbit_manage_torrent(c, t_hash)
         elif op == "unsub":
             from storage.downloads import remove_download
-            remove_download(t_hash.lower())
+            await remove_download(t_hash.lower())
             await c.answer("🔕 Отписался от уведомления")
             return await qbit_manage_torrent(c, t_hash)
         elif op == "watch":
