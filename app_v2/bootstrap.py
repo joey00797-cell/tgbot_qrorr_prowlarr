@@ -6,6 +6,8 @@ from config.settings import TELEGRAM_TOKEN
 from middlewares.auth import AuthMiddleware
 from services.watchdog import torrent_watchdog_loop
 from storage.database import init_db
+from storage.watchlist import init_watchlist
+from storage.history import init_history
 import routers.menu as menu_module
 import routers.torrents as torrents_module
 import routers.search as search_module
@@ -18,6 +20,8 @@ async def on_startup(bot: Bot):
     log.info("🚀 Начинаю инициализацию системных служб...")
     try:
         await init_db()
+        await init_watchlist()
+        await init_history()
         log.info("  ├── [ OK ]   База данных SQLite      🗄️ (storage/bot.db)")
     except Exception as e:
         log.error(f"  ├── [ERROR]  Ошибка базы данных: {e}")

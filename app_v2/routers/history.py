@@ -13,8 +13,8 @@ from routers.search import search_results_cache, local_generate_search_page
 
 PER_PAGE = 10
 
-def build_history_keyboard(uid: int, page: int = 1):
-    history = get_history(uid)
+async def build_history_keyboard(uid: int, page: int = 1):
+    history = await get_history(uid)
     total = len(history)
     start = (page - 1) * PER_PAGE
     end = start + PER_PAGE
@@ -52,17 +52,17 @@ def build_history_keyboard(uid: int, page: int = 1):
 @router.callback_query(F.data == "show_history")
 async def show_history(c: types.CallbackQuery):
     uid = c.from_user.id
-    history = get_history(uid)
+    history = await get_history(uid)
     if not history:
         return await c.answer("История пуста — сначала что-нибудь поищи.", show_alert=True)
-    text, markup = build_history_keyboard(uid, page=1)
+    text, markup = await build_history_keyboard(uid, page=1)
     await c.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("hist_page_"))
 async def hist_paginate(c: types.CallbackQuery):
     page = int(c.data.split("_")[2])
-    text, markup = build_history_keyboard(c.from_user.id, page=page)
+    text, markup = await build_history_keyboard(c.from_user.id, page=page)
     try:
         await c.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
     except Exception:
@@ -73,7 +73,7 @@ async def hist_paginate(c: types.CallbackQuery):
 async def hist_pick(c: types.CallbackQuery):
     parts = c.data.split("_")
     idx = int(parts[2])
-    history = get_history(c.from_user.id)
+    history = await get_history(c.from_user.id)
     if idx >= len(history):
         return await c.answer("Запись не найдена.", show_alert=True)
     query = history[idx]
@@ -126,7 +126,7 @@ async def hist_clear_confirm(c: types.CallbackQuery):
 
 @router.callback_query(F.data == "hist_clear_cancel")
 async def hist_clear_cancel(c: types.CallbackQuery):
-    text, markup = build_history_keyboard(c.from_user.id, page=1)
+    text, markup = await build_history_keyboard(c.from_user.id, page=1)
     await c.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
 
 
