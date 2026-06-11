@@ -17,9 +17,9 @@ import config as _config
 router = Router()
 log = logging.getLogger("torrent_bot")
 
-search_results_cache = {}  # uid -> {"results": [...], "query": "..."}
-pending_choices = {}        # uid -> {"hash": ..., "cat": ..., "notify": ..., "title": ...}
-meta_cache = {}             # uid -> {"tmdb_title": ..., "tmdb_title_ru": ...}
+search_results_cache = {}
+pending_choices = {}
+meta_cache = {}
 
 MENU_BUTTONS = {
     "📊 Статус закачек",
@@ -141,10 +141,7 @@ def local_generate_detail_page(item, idx, page, similar=None):
         text += "\n\n⚠️ <b>Похожее уже есть в базе:</b> " + matches
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="📥 Скачать", callback_data=f"dl_{idx}"))
-    kb.row(
-        InlineKeyboardButton(text="🔙 Назад к списку", callback_data=f"page_{page}"),
-        InlineKeyboardButton(text="📊 Статус закачек", callback_data="qbit_page_1"),
-    )
+    kb.row(InlineKeyboardButton(text="🔙 Назад к списку", callback_data=f"page_{page}"))
     return text, kb.as_markup()
 
 
@@ -278,17 +275,6 @@ async def view_item(c: types.CallbackQuery):
                                       link_preview_options=LinkPreviewOptions(is_disabled=True))
     except Exception:
         await c.answer()
-        if poster_url:
-            await c.message.delete()
-            await c.message.answer_photo(
-                photo=poster_url,
-                caption=text,
-                reply_markup=markup,
-                parse_mode="HTML"
-            )
-        else:
-            await c.message.edit_text(text, reply_markup=markup, parse_mode="HTML",
-                                      link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 
 @router.callback_query(F.data.startswith("dl_"))
@@ -338,6 +324,13 @@ async def download_torrent_callback(c: types.CallbackQuery):
                 if t_name[:40] in title_lower or title_lower[:40] in t_name:
                     found = t
                     break
+            
+            kb = InlineKeyboardBuilder()
+            kb.row(
+                InlineKeyboardButton(text="🔍 Назад к поиску", callback_data="choice_back_search"),
+                InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")
+            )
+
             if found:
                 progress = int(found.get("progress", 0) * 100)
                 eta = found.get("eta", -1)
@@ -356,21 +349,26 @@ async def download_torrent_callback(c: types.CallbackQuery):
                     "checkingDL": "🔍 Проверка", "metaDL": "🔎 Загрузка метаданных",
                 }
                 state_str = state_map.get(found.get("state", ""), f"❓ {found.get('state', '')}")
+                
                 await proc_msg.edit_text(
                     f"⚠️ <b>Торрент уже в списке!</b>\n\n"
                     f"📦 {e(found['name'][:45])}\n"
                     f"📊 {state_str} | 🔄 {progress}% | ⏱ {eta_str}",
+                    reply_markup=kb.as_markup(),
                     parse_mode="HTML"
                 )
             else:
-                await proc_msg.edit_text("⚠️ Торрент уже добавлен в qBittorrent.", parse_mode="HTML")
+                await proc_msg.edit_text(
+                    "⚠️ Торрент уже добавлен в qBittorrent.",
+                    reply_markup=kb.as_markup(),
+                    parse_mode="HTML"
+                )
             return
 
         if not result:
             await proc_msg.edit_text("❌ qBittorrent отклонил добавление торрента.", parse_mode="HTML")
             return
 
-        # Получаем hash
         if isinstance(result, str) and len(result) == 40:
             hash_id = result.lower()
         else:
@@ -399,7 +397,6 @@ async def download_torrent_callback(c: types.CallbackQuery):
             )
             return
 
-        # Сохраняем pending с автокатегорией, торрент на паузе
         auto_cat = detect_category(title)
         auto_watch = "(обновляемая)" in title.lower()
         _meta = meta_cache.get(c.from_user.id, {})
@@ -505,6 +502,7 @@ async def handle_choice(c: types.CallbackQuery):
         pending_choices[uid]["cat"] = CAT_TV
     elif action == "choice_cat_movie":
         pending_choices[uid]["cat"] = CAT_MOVIE
+
     elif action == "choice_cat_none":
         pending_choices[uid]["cat"] = CAT_NONE
     elif action == "choice_notify_me":
@@ -513,101 +511,58 @@ async def handle_choice(c: types.CallbackQuery):
         pending_choices[uid]["notify"] = "all"
     elif action == "choice_watch":
         pending_choices[uid]["watch"] = not pending_choices[uid].get("watch", False)
-
     elif action == "choice_confirm":
         choice = pending_choices.pop(uid, {})
         hash_id = choice.get("hash")
-        cat     = choice.get("cat")
-        notify  = choice.get("notify")
-        title   = choice.get("title", "Unknown")
+        cat = choice.get("cat")
+        notify = choice.get("notify")
+        title = choice.get("title", "")
+        tmdb_title = choice.get("tmdb_title", "")
+        watch = choice.get("watch", False)
 
         if not hash_id:
             return await c.answer(SESSION_EXPIRED, show_alert=True)
 
-        from services.qbittorrent import qb
+        try:
+            from services.qbittorrent import qb
+            if cat and cat != CAT_NONE:
+                await qb.set_category(hash_id=hash_id, category=cat)
+            await qb.resume_torrent(hashes=hash_id)
 
-        # Устанавливаем категорию
-        if cat and cat != CAT_NONE:
-            try:
-                await qb.set_category(hash_id, cat)
-            except Exception as ex:
-                log.error(f"[SEARCH] Ошибка установки категории: {ex}")
-
-        # Проверяем дубли по названию
-        similar = await find_similar_downloads(title)
-        if similar:
-            pending_choices[uid] = choice
-            kb_dup = InlineKeyboardBuilder()
-            kb_dup.row(
-                InlineKeyboardButton(text="✅ Всё равно добавить", callback_data="choice_confirm_force"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data="choice_cancel"),
+            await save_download(
+                hash_id=hash_id,
+                uid=uid,
+                title=title,
+                tmdb_title=tmdb_title,
+                notify=notify,
             )
-            matches = '\n'.join('  • ' + m['title'][:50] + ' (' + str(m['similarity']) + '%)' for m in similar[:3])
+
+            if watch:
+                await add_watch(hash_id, uid, title)
+                log.info(f"[SEARCH] {uid} watch: {title[:40]}")
+
+            cat_label = {"movie": "Фильм", "tv": "Сериал"}.get(cat, "Прочее")
+            notify_label = "Только тебе" if notify == "me" else "Всем"
+            watch_label = "\n Следим за обновлениями" if watch else ""
+
+            kb = InlineKeyboardBuilder()
+            kb.row(
+                InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"),
+                InlineKeyboardButton(text="📊 Статус закачек", callback_data="qbit_page_1"),
+            )
             await c.message.edit_text(
-                "<b>⚠️ Похожий торрент уже есть в базе:</b>\n\n" + matches + "\n\nВсё равно запустить <b>" + e(title[:40]) + "</b>?",
-                reply_markup=kb_dup.as_markup(),
+                f"⏸ <b>Запущено!</b>\n\n📦 {e(title[:50])}\n{cat_label} | {notify_label}{watch_label}",
+                reply_markup=kb.as_markup(),
                 parse_mode="HTML"
             )
-            return
-
-        # Запускаем торрент
-        await qb.resume_torrent(hash_id)
-
-        # Сохраняем в downloads
-        await save_download(hash_id, uid, title, notify, tmdb_title=choice.get("tmdb_title", ""))
-
-        # Уведомляем админа о начале закачки
-        if uid != int(_config.ADMIN_ID):
-            from storage.users import get_user
-            user_data = get_user(uid)
-            uname = user_data.get("username", str(uid)) if user_data else str(uid)
-            try:
-                await c.bot.send_message(
-                    chat_id=int(_config.ADMIN_ID),
-                    text="📥 Новая закачка\n👤 @" + uname + " (id: " + str(uid) + ")\n📦 " + title[:60],
-                )
-            except Exception:
-                pass
-
-
-        # Сохраняем в watchlist если выбрано слежение
-        if choice.get("watch"):
-            from services.qbittorrent import qb as _qb
-            torrents = await _qb.torrents()
-            t = next((t for t in torrents if t.get("hash", "").lower() == hash_id.lower()), None)
-            size = t.get("size", 0) if t else 0
-            await add_watch(hash_id, uid, title, size)
-            log.info(f"[WATCH] {uid} следит за: {title[:40]}")
-
-        cat_label    = "📺 Сериал" if cat == CAT_TV else "🎬 Фильм" if cat == CAT_MOVIE else "📦 Прочее"
-        notify_label = "🔔 Только тебе" if notify == "me" else "📢 Всем"
-        watch_label  = "🔄 Слежу за обновлениями" if choice.get("watch") else ""
-
-        log.info(f"[SEARCH] {uid} подтвердил запуск: {title[:40]} | {cat_label} | {notify_label}")
-
-        watch_line = f"\n{watch_label}" if watch_label else ""
-        await c.message.edit_text(
-            f"✅ <b>Закачка запущена!</b>\n\n"
-            f"📦 {e(title[:50])}\n"
-            f"📂 {cat_label} | {notify_label}"
-            f"{watch_line}\n\n"
-            f"Уведомление придёт когда скачается.",
-            parse_mode="HTML"
-        )
+            log.info(f"[SEARCH] {uid} confirm: {title[:40]} | cat={cat} | notify={notify}")
+        except Exception as ex:
+            log.error(f"[SEARCH] confirm error: {ex}", exc_info=True)
+            await c.answer(f"Error: {str(ex)[:80]}", show_alert=True)
         return
 
-    # Обновляем клавиатуру
     try:
         await c.message.edit_reply_markup(reply_markup=build_choice_keyboard(uid))
     except Exception:
         pass
     await c.answer()
-
-
-@router.callback_query(F.data == "choice_confirm_force")
-async def choice_confirm_force(c: types.CallbackQuery):
-    uid = c.from_user.id
-    if uid not in pending_choices:
-        return await c.answer("⏰ Сессия устарела", show_alert=True)
-    c.data = "choice_confirm"
-    await handle_choice(c)

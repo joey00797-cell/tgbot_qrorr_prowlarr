@@ -255,14 +255,14 @@ async def qbit_manage_torrent(c: types.CallbackQuery, t_hash: str = None):
         if progress < 100:
             if subscribed:
                 kb.row(
-                    types.InlineKeyboardButton(text="🔔 Подписан ✓", callback_data="qbit_noop"),
+                    types.InlineKeyboardButton(text="🔔 Подписан ✓", callback_data=f"qbit_op_check_{t_hash}"),
                     types.InlineKeyboardButton(text="🔕 Отписаться", callback_data=f"qbit_op_unsub_{t_hash}"),
                 )
             else:
                 kb.row(types.InlineKeyboardButton(text="🔔 Подписаться на уведомление", callback_data=f"qbit_op_sub_{t_hash}"))
         if watching:
             kb.row(
-                types.InlineKeyboardButton(text="🔄 Слежу ✓", callback_data="qbit_noop"),
+                types.InlineKeyboardButton(text="🔍 Проверить", callback_data=f"qbit_op_check_{t_hash}"),
                 types.InlineKeyboardButton(text="⏹ Не следить", callback_data=f"qbit_op_unwatch_{t_hash}"),
             )
         else:
@@ -324,6 +324,35 @@ async def qbit_execute_op(c: types.CallbackQuery):
             await remove_watch(t_hash.lower())
             await c.answer("⏹ Слежение отключено")
             return await qbit_manage_torrent(c, t_hash)
+        elif op == "check":
+            from storage.watchlist import get_watch
+            from services.prowlarr import search as search_prowlarr
+            import re
+            watch_info = get_watch(t_hash.lower())
+            if not watch_info:
+                await c.answer("❌ Нет данных для проверки", show_alert=True)
+                return await qbit_manage_torrent(c, t_hash)
+            title = watch_info.get("title", "")
+            old_size = watch_info.get("size", 0)
+            clean_title = title.split("(")[0].replace("(обновляемая)", "").strip()
+            season_match = re.search(r"[Ss](\d{1,2})[Ee]", title)
+            if season_match:
+                season = int(season_match.group(1))
+                clean_title = f"{clean_title} S{season:02d}"
+            try:
+                results = await search_prowlarr(clean_title)
+                if not results:
+                    await c.answer("🔍 Ничего не найдено", show_alert=True)
+                    return await qbit_manage_torrent(c, t_hash)
+                best = max(results, key=lambda x: x.get("size", 0))
+                new_size = best.get("size", 0)
+                if new_size > old_size and old_size > 0:
+                    await c.answer(f"🎉 Обновление! +{(new_size - old_size) / (1024**3):.1f} GB", show_alert=True)
+                else:
+                    await c.answer("✅ Обновлений нет", show_alert=True)
+            except Exception as e:
+                await c.answer(f"⚠️ Ошибка проверки: {str(e)[:50]}", show_alert=True)
+            return await qbit_manage_torrent(c, t_hash)
         await qbit_manage_torrent(c, t_hash)
     except Exception as e:
         await c.answer("Ошибка операции", show_alert=True)
@@ -333,7 +362,6 @@ async def qbit_execute_op(c: types.CallbackQuery):
 # ПРИЕМ ССЫЛОК И ФАЙЛОВ
 # =========================================================
 
-@router.callback_query(F.data.startswith("watch_"))
 @router.callback_query(F.data.startswith("watch_"))
 async def handle_watch_action(c: types.CallbackQuery):
     parts = c.data.split("_")

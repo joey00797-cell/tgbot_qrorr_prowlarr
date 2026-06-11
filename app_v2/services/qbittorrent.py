@@ -100,6 +100,8 @@ class QBittorrentClient:
             if paused:
                 p_part = mpwriter.append("true")
                 p_part.set_content_disposition('form-data', name='paused')
+                s_part = mpwriter.append("true")
+                s_part.set_content_disposition('form-data', name='stopped')
 
             headers = {}
             if self.cookie:
@@ -136,6 +138,7 @@ class QBittorrentClient:
             data.add_field("category", category)
         if paused:
             data.add_field("paused", "true")
+            data.add_field("stopped", "true")
         headers = {"Cookie": self.cookie} if self.cookie else {}
         async with self.session.post(url, data=data, headers=headers) as resp:
             body = await resp.text()

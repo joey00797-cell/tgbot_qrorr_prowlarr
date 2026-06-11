@@ -16,7 +16,8 @@ async def init_db():
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 role TEXT,
-                status TEXT
+                status TEXT,
+                full_name TEXT
             )
         """)
         await db.execute("""

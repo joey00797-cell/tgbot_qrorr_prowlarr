@@ -12,6 +12,7 @@ async def _check_updates(bot: Bot):
     watches = get_all_watches()
     if not watches: return
     from services.prowlarr import search as search_prowlarr
+    from services.prowlarr import extract_voice
     try:
         torrents = await qb.torrents()
         torrent_map = {t.get('hash', '').lower(): t for t in torrents}
@@ -23,7 +24,21 @@ async def _check_updates(bot: Bot):
                 await remove_watch(hash_id)
                 log.info(f'[WATCH] Removed: {title[:40]}')
                 continue
-            clean_title = title.split('(')[0].replace('(обновляемая)', '').strip()
+            # Извлекаем сезон из title (S5E1-8 → S05)
+            import re
+            season_match = re.search(r'[Ss](\d{1,2})[Ee]', title)
+            season = None
+            if season_match:
+                season = int(season_match.group(1))
+            clean_title = title.replace('(обновляемая)', '').strip()            # Очищаем title: убираем (обновляе
+            clean_title = re.sub(r'\s*\([^)]*\d{4}[^)]*\)', '', clean_title)            # Уб
+            clean_title = re.sub(r'\s*\[[^\]]*\]', '', clean_title)
+            clean_title = clean_title.strip()
+            voice, _ = extract_voice(title)
+            if voice:
+                clean_title = f"{clean_title} {voice}"
+            if season:
+                clean_title = f"{clean_title} S{season:02d}"
             results = await search_prowlarr(clean_title)
             if not results: continue
             best = max(results, key=lambda x: x.get('size', 0))
@@ -37,7 +52,12 @@ async def _check_updates(bot: Bot):
                 kb.row(InlineKeyboardButton(text='Update', callback_data=f'watch_update_{hash_id}'))
                 size_diff = round((new_size - old_size) / (1024**3), 2)
                 await bot.send_message(chat_id=int(uid), text=f'Update!\n{title[:50]}\n+{size_diff} GB', reply_markup=kb.as_markup())
-    except Exception as ex: log.error(f'[WATCH] Error: {ex}')
+    except asyncio.TimeoutError:
+        log.warning(f'[WATCH] Таймаут для "{clean_title[:40]}" — пропускаем')
+    except Exception as ex:
+        import traceback
+        log.error(f'[WATCH] Error: {ex}')
+        log.error(traceback.format_exc())
 async def torrent_watchdog_loop(bot: Bot):
     log.info('[WATCHDOG] Loop started')
     await asyncio.sleep(5)
@@ -71,9 +91,9 @@ async def torrent_watchdog_loop(bot: Bot):
                     else:
                         notify = 'me'
                         owner_uid = int(config.ADMIN_ID)
-                    text = f'Download complete!\n{name}\nSize: {size_gb} GB'
+                    text = f'🎬 <b>Скачано!</b>\n\n📦 {name}\n💾 {size_gb} GB\n\n🍿 Приятного просмотра!'
                     if notify == 'me':
-                        try: await bot.send_message(chat_id=owner_uid, text=text)
+                        try: await bot.send_message(chat_id=owner_uid, text=text, parse_mode="HTML")
                         except Exception: pass
                         if owner_uid != int(config.ADMIN_ID):
                             user_data = user_storage.get_user(owner_uid)
@@ -82,7 +102,7 @@ async def torrent_watchdog_loop(bot: Bot):
                     elif notify == 'all':
                         active_users = user_storage.get_all_active_users()
                         for u in active_users:
-                            try: await bot.send_message(chat_id=int(u['user_id']), text=text)
+                            try: await bot.send_message(chat_id=int(u['user_id']), text=text, parse_mode="HTML")
                             except Exception: pass
             await _check_updates(bot)
         except Exception as ex: log.error(f'[WATCHDOG] Loop error: {ex}')
