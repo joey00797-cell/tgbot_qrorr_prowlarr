@@ -13,6 +13,7 @@ import routers.torrents as torrents_module
 import routers.search as search_module
 import routers.admin as admin_module
 import routers.history as history_module
+import routers.settings as settings_module
 
 log = logging.getLogger("torrent_bot")
 
@@ -83,6 +84,7 @@ def register_all_routers(dp: Dispatcher):
         (admin_module.router,    "Панель администратора", admin_module.__name__),
         (torrents_module.router, "Управление торрентами", torrents_module.__name__),
         (history_module.router,  "История поиска",        history_module.__name__),
+        (settings_module.router, "Настройки",             settings_module.__name__),
         (search_module.router,   "Поиск Prowlarr",        search_module.__name__),
     ]
     for router, name, mod_name in modules_to_load:

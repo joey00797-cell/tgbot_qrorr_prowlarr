@@ -14,7 +14,10 @@ def get_main_menu(is_admin: bool = False):
         ]
     ]
     if is_admin:
-        keyboard.append([KeyboardButton(text="⚙️ Админка")])
+        keyboard.append([
+            KeyboardButton(text="⚙️ Админка"),
+            KeyboardButton(text="🔧 Настройки"),
+        ])
 
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
