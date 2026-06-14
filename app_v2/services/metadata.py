@@ -68,6 +68,7 @@ async def get_movie_metadata(query: str, year: str = None):
                 "release": target_item.get("release_date") or target_item.get("first_air_date", "N/A"),
                 "poster_url": poster_url,
                 "genres": genres,
+                "tmdb_id": target_item.get("id"),
             }
     except Exception as e:
         log.error(f"[TMDB] Ошибка получения метаданных: {e}")

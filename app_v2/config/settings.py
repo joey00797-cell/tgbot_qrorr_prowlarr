@@ -33,3 +33,10 @@ DB_FILE = USERS_DB
 # qBittorrent категории
 QBIT_CAT_MOVIE = os.environ.get("QBIT_CAT_MOVIE", "radarr")
 QBIT_CAT_TV = os.environ.get("QBIT_CAT_TV", "tv-sonarr")
+
+# Radarr
+RADARR_URL = os.environ.get("RADARR_URL", "http://192.168.31.206:7878")
+RADARR_KEY = os.environ.get("RADARR_KEY", "a72279cd656a4d6b83a747c8b7e8b69a")
+# Sonarr
+SONARR_URL = os.environ.get("SONARR_URL", "http://192.168.31.206:8989")
+SONARR_KEY = os.environ.get("SONARR_KEY", "c37984315a3b46678b40b4bebc12f7df")

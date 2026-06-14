@@ -249,6 +249,7 @@ async def view_item(c: types.CallbackQuery):
     if meta:
         meta_cache[c.from_user.id] = {
             "tmdb_title": meta.get("title", ""),
+            "tmdb_id": meta.get("tmdb_id"),
         }
         overview = e(meta.get('overview', ''))
         if len(overview) > 700:
@@ -525,9 +526,17 @@ async def handle_choice(c: types.CallbackQuery):
 
         try:
             from services.qbittorrent import qb
+            from services.arrs import add_to_radarr, add_to_sonarr
             if cat and cat != CAT_NONE:
                 await qb.set_category(hash_id=hash_id, category=cat)
             await qb.resume_torrent(hashes=hash_id)
+            _meta = meta_cache.get(uid, {})
+            _tmdb_id = _meta.get('tmdb_id')
+            if _tmdb_id:
+                if cat == CAT_MOVIE:
+                    await add_to_radarr(_tmdb_id)
+                elif cat == CAT_TV:
+                    await add_to_sonarr(_tmdb_id)
 
             await save_download(
                 hash_id=hash_id,
