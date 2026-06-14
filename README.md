@@ -64,18 +64,6 @@ docker compose up -d torrent-bot-v2
 | `DEBUG_MODE` | Режим отладки (default: False) |
 | `TZ` | Timezone (default: Europe/Kiev) |
 
-## 🏗 Инфраструктура
-
-```
-Proxmox (RD18)
-└── LXC 110 — торрент-бот
-    └── Docker: torrent-bot-v2
-└── LXC 108 — arr-стак
-    ├── Docker: radarr, sonarr, prowlarr
-    ├── Docker: qbittorrent, jellyfin
-    └── status-server (порт 9999) — HTTP эндпоинт статуса дисков
-```
-
 ## 📁 Структура проекта
 
 ```
@@ -86,8 +74,8 @@ app_v2/
 ├── routers/
 │   ├── menu.py            — /start, главное меню
 │   ├── admin.py           — управление пользователями
-│   ├── torrents.py        — дашборд закачек (cb: qbit_page_N)
-│   ├── search.py          — поиск, карточка, выбор категории (cb: choice_*)
+│   ├── torrents.py        — дашборд закачек
+│   ├── search.py          — поиск, карточка, выбор категории
 │   ├── history.py         — история поиска
 │   ├── settings.py        — панель настроек для админа
 │   └── talker.py          — пинг, аптайм
@@ -95,17 +83,16 @@ app_v2/
 │   ├── qbittorrent.py     — HTTP-клиент qBit
 │   ├── watchdog.py        — мониторинг завершения закачек
 │   ├── prowlarr.py        — поиск раздач
-│   ├── metadata.py        — TMDB (возвращает tmdb_id)
-│   └── arrs.py            — add_to_radarr(), add_to_sonarr()
+│   ├── metadata.py        — TMDB метаданные
+│   └── arrs.py            — интеграция с Radarr и Sonarr
 ├── storage/
 │   ├── database.py        — SQLite пул (aiosqlite)
-│   ├── bot.db             — таблицы: users, downloads, watchlist, history
 │   ├── users.py
 │   ├── downloads.py
 │   ├── history.py
 │   └── watchlist.py
 └── utils/
-    ├── logger.py          — KyivFormatter
+    ├── logger.py
     └── formatters.py
 ```
 
@@ -116,25 +103,11 @@ app_v2/
 3. Пользователь выбирает категорию (фильм/сериал) и уведомления
 4. После подтверждения:
    - qBit: устанавливается категория + торрент запускается
-   - Radarr/Sonarr: фильм/сериал добавляется по TMDB ID
+   - Radarr/Sonarr: фильм/сериал добавляется по TMDB ID автоматически
 5. После скачивания Radarr/Sonarr импортируют файл → Jellyfin подхватывает
 
-## 🛠 Алиасы (LXC 110)
+## 📡 Status Server (опционально)
 
-```bash
-bot-restart          # рестарт + логи
-bot-logs             # логи бота
-bot-deploy           # пересборка образа
-bot-sync             # sync файлов из контейнера в репо
-bot-push 'msg'       # sync + commit, затем && git push
-```
-
-## 📡 Status Server (LXC 108)
-
-Простой HTTP сервер на порту 9999 отдаёт статус дисков в JSON.
-Запускается как systemd сервис `status-server`.
-
-```bash
-curl http://192.168.31.206:9999
-# {"arr": {"total": ..., "used": ..., "free": ...}, "media": {...}}
-```
+Для отображения статуса дисков в панели настроек бота нужен простой HTTP сервер
+на машине с arr-стаком (порт 9999). Пример скрипта в `scripts/status_server.py`.
+Укажи его URL в `config/settings.py` → `STATUS_SERVER_URL`.
