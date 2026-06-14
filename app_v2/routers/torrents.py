@@ -245,7 +245,7 @@ async def qbit_manage_torrent(c: types.CallbackQuery, t_hash: str = None):
         name = target_t.get("name")
         progress = int(target_t.get("progress", 0) * 100)
         subscribed = (await get_download(t_hash.lower())) is not None
-        watching = get_watch(t_hash.lower()) is not None
+        watching = (await get_watch(t_hash.lower())) is not None
 
         kb = InlineKeyboardBuilder()
         kb.row(
@@ -328,7 +328,7 @@ async def qbit_execute_op(c: types.CallbackQuery):
             from storage.watchlist import get_watch
             from services.prowlarr import search as search_prowlarr
             import re
-            watch_info = get_watch(t_hash.lower())
+            watch_info = await get_watch(t_hash.lower())
             if not watch_info:
                 await c.answer("❌ Нет данных для проверки", show_alert=True)
                 return await qbit_manage_torrent(c, t_hash)
@@ -383,7 +383,7 @@ async def handle_watch_action(c: types.CallbackQuery):
     if action == "update":
         from storage.watchlist import get_watch, remove_watch
         from services.prowlarr import search as search_prowlarr
-        info = get_watch(hash_id)
+        info = await get_watch(hash_id)
         if not info:
             return await c.answer("Данные устарели.", show_alert=True)
 

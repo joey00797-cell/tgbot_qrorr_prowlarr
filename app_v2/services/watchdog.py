@@ -9,7 +9,7 @@ import config
 log = logging.getLogger('torrent_bot')
 _notified_hashes = set()
 async def _check_updates(bot: Bot):
-    watches = get_all_watches()
+    watches = await get_all_watches()
     if not watches: return
     from services.prowlarr import search as search_prowlarr
     from services.prowlarr import extract_voice
