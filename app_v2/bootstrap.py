@@ -26,6 +26,52 @@ async def on_startup(bot: Bot):
     except Exception as e:
         log.error(f"  ├── [ERROR]  Ошибка базы данных: {e}")
         
+    # qBittorrent
+    try:
+        from services.qbittorrent import qb
+        await qb.login()
+        log.info("  ├── [ OK ]   qBittorrent             🔩 (services/qbittorrent.py)")
+    except Exception as e:
+        log.error(f"  ├── [ERROR]  qBittorrent: {e}")
+
+    # Prowlarr
+    try:
+        import aiohttp
+        import config as _config
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{_config.PROWLARR_BASE_URL}/api/v1/system/status",
+                             headers={"X-Api-Key": _config.PROWLARR_API_KEY}) as r:
+                if r.status == 200:
+                    log.info("  ├── [ OK ]   Prowlarr               🔍 (services/prowlarr.py)")
+                else:
+                    log.warning(f"  ├── [WARN]  Prowlarr: status {r.status}")
+    except Exception as e:
+        log.error(f"  ├── [ERROR]  Prowlarr: {e}")
+
+    # Radarr
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{_config.RADARR_URL}/api/v3/system/status",
+                             headers={"X-Api-Key": _config.RADARR_KEY}) as r:
+                if r.status == 200:
+                    log.info("  ├── [ OK ]   Radarr                 🎬 (services/arrs.py)")
+                else:
+                    log.warning(f"  ├── [WARN]  Radarr: status {r.status}")
+    except Exception as e:
+        log.error(f"  ├── [ERROR]  Radarr: {e}")
+
+    # Sonarr
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{_config.SONARR_URL}/api/v3/system/status",
+                             headers={"X-Api-Key": _config.SONARR_KEY}) as r:
+                if r.status == 200:
+                    log.info("  ├── [ OK ]   Sonarr                 📺 (services/arrs.py)")
+                else:
+                    log.warning(f"  ├── [WARN]  Sonarr: status {r.status}")
+    except Exception as e:
+        log.error(f"  ├── [ERROR]  Sonarr: {e}")
+
     asyncio.create_task(torrent_watchdog_loop(bot))
     log.info("  ├── [ OK ]   Служба Watchdog запущен  🛰️ (services/watchdog.py)")
     log.info("  └── [SUCCESS] Бот успешно запущен и готов к работе! 🤖")

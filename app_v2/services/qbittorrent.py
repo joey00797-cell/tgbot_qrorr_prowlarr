@@ -28,10 +28,10 @@ class QBittorrentClient:
             "Origin": self.base_url,
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         }
-        log.info(f"[QBIT] AUTH -> {self.base_url}")
+        log.debug(f"[QBIT] AUTH -> {self.base_url}")
         try:
             async with self.session.post(url, data=data, headers=headers) as resp:
-                log.info(f"[QBIT] LOGIN STATUS: {resp.status}")
+                log.debug(f"[QBIT] LOGIN STATUS: {resp.status}")
                 if resp.status not in [200, 204]:
                     text = await resp.text()
                     raise Exception(f"Auth failed with status {resp.status}: {text}")
@@ -39,7 +39,7 @@ class QBittorrentClient:
                 for c in cookies:
                     if 'QBT_SID' in c or 'SID' in c:
                         self.cookie = c.split(';')[0]
-                        log.info(f"[QBIT] Saved cookie: {self.cookie}")
+                        log.debug(f"[QBIT] Saved cookie: {self.cookie}")
                         break
         except Exception as e:
             self.cookie = None
