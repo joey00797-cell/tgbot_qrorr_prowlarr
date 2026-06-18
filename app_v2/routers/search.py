@@ -12,6 +12,7 @@ from services.metadata import get_movie_metadata
 from storage.downloads import save_download, find_similar_downloads
 from storage.history import add_query
 from storage.watchlist import add_watch, get_watch
+from storage.preferences import get_settings, add_genre_from_history
 import config as _config
 
 router = Router()
@@ -93,12 +94,13 @@ def local_generate_search_page(results, page=1, per_page=5, search_query=None):
     sliced = results[start:end]
     total_pages = (total + per_page - 1) // per_page if total > 0 else 1
 
-    text = f"🔍 <b>Результаты поиска (Стр. {page} из {total_pages}):</b>\n\n"
+    query_label = f'  "{search_query}"' if search_query else ''
+    text = f"🔍 <b>Результаты поиска{query_label}:</b>\n\n"
     kb_builder = InlineKeyboardBuilder()
-
+    kb_builder = InlineKeyboardBuilder()
     for i, item in enumerate(sliced, start=start+1):
-        seeds = item.get("seeders", 0)
         peers = item.get("leechers", 0)
+        seeds = item.get("seeders", 0)
         size_gb = round(item.get("size", 0) / (1024**3), 2) if item.get("size") else 0
         torrent_url = item.get("infoUrl") or item.get("comments") or item.get("guid") or "#"
         indexer_name = e(item.get('indexer', 'Prowlarr'))
@@ -110,14 +112,14 @@ def local_generate_search_page(results, page=1, per_page=5, search_query=None):
         kb_builder.add(InlineKeyboardButton(text=f"{i}", callback_data=f"view_{i}_{page}"))
 
     kb_builder.adjust(5)
-    nav_buttons = []
-    if page > 1:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️ Пред.", callback_data=f"page_{page-1}"))
-    if end < total:
-        nav_buttons.append(InlineKeyboardButton(text="След. ➡️", callback_data=f"page_{page+1}"))
     nav_builder = InlineKeyboardBuilder()
-    if nav_buttons:
-        nav_builder.row(*nav_buttons)
+    nav_row = []
+    nav_row.append(InlineKeyboardButton(text="⏮" if page > 1 else "·", callback_data="page_1" if page > 1 else "noop"))
+    nav_row.append(InlineKeyboardButton(text="◀" if page > 1 else "·", callback_data=f"page_{page-1}" if page > 1 else "noop"))
+    nav_row.append(InlineKeyboardButton(text=f"{page} / {total_pages}", callback_data="noop"))
+    nav_row.append(InlineKeyboardButton(text="▶" if end < total else "·", callback_data=f"page_{page+1}" if end < total else "noop"))
+    nav_row.append(InlineKeyboardButton(text="⏭" if page < total_pages else "·", callback_data=f"page_{total_pages}" if page < total_pages else "noop"))
+    nav_builder.row(*nav_row)
     nav_builder.row(
         InlineKeyboardButton(text="🔄 Обновить", callback_data="search_refresh"),
         InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"),
@@ -145,6 +147,41 @@ def local_generate_detail_page(item, idx, page, similar=None):
     kb.row(InlineKeyboardButton(text="🔙 Назад к списку", callback_data=f"page_{page}"))
     return text, kb.as_markup()
 
+
+
+async def do_search(uid: int, query: str, target_message, edit: bool = False):
+    import time as _time
+    _t = _time.time()
+    try:
+        raw_results = await search_prowlarr(query)
+        _ms = int((_time.time() - _t) * 1000)
+        results = sorted(raw_results, key=lambda x: int(x.get("seeders", 0)), reverse=True)
+        search_results_cache[uid] = {"results": results, "query": query}
+        await add_query(uid, query)
+        log.info(f'[SEARCH] {uid} | "{query}" -> {len(results)} results | {_ms}ms')
+        if not results:
+            if edit:
+                await target_message.edit_text("\u274c Ничего не найдено.")
+            else:
+                await target_message.answer("\u274c Ничего не найдено.")
+            return
+        text_out, markup = local_generate_search_page(results, page=1, search_query=query)
+        if edit:
+            await target_message.edit_text(text_out, parse_mode="HTML", reply_markup=markup,
+                                           link_preview_options=LinkPreviewOptions(is_disabled=True))
+        else:
+            await target_message.answer(text_out, parse_mode="HTML", reply_markup=markup,
+                                        link_preview_options=LinkPreviewOptions(is_disabled=True))
+    except asyncio.TimeoutError:
+        text = "\u23f1 Поиск занял слишком много времени."
+        await (target_message.edit_text(text) if edit else target_message.answer(text))
+    except Exception as ex:
+        log.error(f"[SEARCH] do_search error {uid}: {ex}", exc_info=True)
+        text = f"\u26a0\ufe0f Ошибка поиска: {str(ex)[:100]}"
+        try:
+            await (target_message.edit_text(text) if edit else target_message.answer(text))
+        except Exception:
+            pass
 
 @router.message(F.text)
 async def handle_search(message: types.Message):
@@ -248,9 +285,14 @@ async def view_item(c: types.CallbackQuery):
     poster_url = None
 
     if meta:
+        from services.discover import GENRES_MOVIE, GENRES_TV
+        _genre_ids = meta.get("genre_ids", [])
+        _genre_names = {gid: GENRES_MOVIE.get(gid, GENRES_TV.get(gid, str(gid))) for gid in _genre_ids}
         meta_cache[c.from_user.id] = {
             "tmdb_title": meta.get("title", ""),
             "tmdb_id": meta.get("tmdb_id"),
+            "genre_ids": _genre_ids,
+            "genre_names": _genre_names,
         }
         overview = e(meta.get('overview', ''))
         if len(overview) > 700:
@@ -547,6 +589,13 @@ async def handle_choice(c: types.CallbackQuery):
                 notify=notify,
             )
 
+            # автосбор жанров из истории
+            _s = await get_settings(uid)
+            if _s.get("use_history", 1):
+                _meta_genres = meta_cache.get(uid, {}).get("genre_ids", [])
+                _meta_genre_names = meta_cache.get(uid, {}).get("genre_names", {})
+                for _gid in _meta_genres:
+                    await add_genre_from_history(uid, _gid, _meta_genre_names.get(_gid, str(_gid)))
             if watch:
                 await add_watch(hash_id, uid, title)
                 log.info(f"[SEARCH] {uid} watch: {title[:40]}")

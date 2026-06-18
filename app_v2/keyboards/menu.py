@@ -7,7 +7,7 @@ from aiogram.types import (
 
 def get_main_menu(is_admin: bool = False):
     keyboard = [
-        [KeyboardButton(text="🔍 Поиск торрентов")],
+        [KeyboardButton(text="🔍 Поиск торрентов"), KeyboardButton(text="🎬 Подобрать фильм")],
         [
             KeyboardButton(text="📥 Добавить торрент"),
             KeyboardButton(text="📊 Статус закачек")

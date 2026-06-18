@@ -8,12 +8,14 @@ from services.watchdog import torrent_watchdog_loop
 from storage.database import init_db
 from storage.watchlist import init_watchlist
 from storage.history import init_history
+from storage.preferences import init_preferences
 import routers.menu as menu_module
 import routers.torrents as torrents_module
 import routers.search as search_module
 import routers.admin as admin_module
 import routers.history as history_module
 import routers.settings as settings_module
+import routers.recommend as recommend_module
 
 log = logging.getLogger("torrent_bot")
 
@@ -23,6 +25,7 @@ async def on_startup(bot: Bot):
         await init_db()
         await init_watchlist()
         await init_history()
+        await init_preferences()
         log.info("  ├── [ OK ]   База данных SQLite      🗄️ (storage/bot.db)")
     except Exception as e:
         log.error(f"  ├── [ERROR]  Ошибка базы данных: {e}")
@@ -85,6 +88,7 @@ def register_all_routers(dp: Dispatcher):
         (torrents_module.router, "Управление торрентами", torrents_module.__name__),
         (history_module.router,  "История поиска",        history_module.__name__),
         (settings_module.router, "Настройки",             settings_module.__name__),
+        (recommend_module.router, "Подбор фильмов",          recommend_module.__name__),
         (search_module.router,   "Поиск Prowlarr",        search_module.__name__),
     ]
     for router, name, mod_name in modules_to_load:

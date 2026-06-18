@@ -35,4 +35,13 @@ async def init_db():
             await db.commit()
         except Exception:
             pass
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                uid INTEGER PRIMARY KEY,
+                genre_ids TEXT DEFAULT '[]',
+                min_year INTEGER DEFAULT 2000,
+                min_rating REAL DEFAULT 6.5,
+                media_type TEXT DEFAULT 'any'
+            )
+        """)
         await db.commit()
