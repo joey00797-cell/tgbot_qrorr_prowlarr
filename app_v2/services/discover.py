@@ -28,6 +28,7 @@ async def get_genres(media_type: str = "movie") -> dict:
     return GENRES_MOVIE if media_type != "tv" else GENRES_TV
 
 async def discover(media_type: str = "movie", genre_ids: list = None,
+                   excluded_genre_ids: list = None,
                    min_year: int = 2000, min_rating: float = 6.5,
                    random_pick: bool = True) -> dict | None:
     params = {
@@ -46,6 +47,8 @@ async def discover(media_type: str = "movie", genre_ids: list = None,
 
     if genre_ids:
         params["with_genres"] = ",".join(str(g) for g in genre_ids)
+    if excluded_genre_ids:
+        params["without_genres"] = ",".join(str(g) for g in excluded_genre_ids)
 
     endpoint = f"{TMDB_BASE}/discover/{media_type}"
 

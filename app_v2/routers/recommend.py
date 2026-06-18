@@ -4,7 +4,7 @@ from aiogram import Router, types, F
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton, LinkPreviewOptions
 from services.discover import discover, get_genres, GENRES_MOVIE, GENRES_TV
-from storage.preferences import get_settings, save_settings, get_liked_genre_ids, set_genre_status, reset_preferences, get_genres
+from storage.preferences import get_settings, save_settings, get_liked_genre_ids, get_excluded_genre_ids, set_genre_status, reset_preferences, get_genres
 
 router = Router()
 log = logging.getLogger("torrent_bot")
@@ -68,6 +68,7 @@ async def rec_random(c: types.CallbackQuery):
     result = await discover(
         media_type="movie",
         genre_ids=_session_search.get(uid, {}).get("genre_ids") or await get_liked_genre_ids(uid) or None,
+        excluded_genre_ids=await get_excluded_genre_ids(uid) or None,
         min_year=prefs["min_year"],
         min_rating=prefs["min_rating"],
         random_pick=True
@@ -123,9 +124,11 @@ async def rec_find(c: types.CallbackQuery):
     except Exception:
         await c.message.delete()
         await c.message.answer("⏳ <b>Подбираю...</b>", parse_mode="HTML")
+    excluded = await get_excluded_genre_ids(uid)
     result = await discover(
         media_type=media_type,
         genre_ids=selected or None,
+        excluded_genre_ids=excluded or None,
         min_year=prefs["min_year"],
         min_rating=prefs["min_rating"],
         random_pick=True
@@ -146,6 +149,7 @@ async def rec_more(c: types.CallbackQuery):
     result = await discover(
         media_type=media_type,
         genre_ids=_session_search.get(uid, {}).get("genre_ids") or await get_liked_genre_ids(uid) or None,
+        excluded_genre_ids=await get_excluded_genre_ids(uid) or None,
         min_year=prefs["min_year"],
         min_rating=prefs["min_rating"],
         random_pick=True
@@ -188,6 +192,9 @@ async def rec_prefs(c: types.CallbackQuery):
             f"🔄 <b>Учитывать историю:</b> {history_label}")
 
     kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🎭 Настроить жанры", callback_data="rec_edit_genres"))
+    kb.row(InlineKeyboardButton(text="📅 Год от: " + str(settings["min_year"]), callback_data="rec_edit_year"))
+    kb.row(InlineKeyboardButton(text="⭐ Рейтинг от: " + str(settings["min_rating"]), callback_data="rec_edit_rating"))
     kb.row(InlineKeyboardButton(text="🔄 История: " + history_label, callback_data="rec_toggle_history"))
     kb.row(InlineKeyboardButton(text="🗑 Сбросить всё", callback_data="rec_prefs_reset"))
     kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="rec_back"))
@@ -195,6 +202,113 @@ async def rec_prefs(c: types.CallbackQuery):
         await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
         await c.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "rec_edit_genres")
+async def rec_edit_genres(c: types.CallbackQuery):
+    uid = c.from_user.id
+    genres = await get_genres(uid)
+    genre_status = {g["genre_id"]: g["status"] for g in genres}
+
+    from services.discover import GENRES_MOVIE
+    all_genres = GENRES_MOVIE
+
+    kb = InlineKeyboardBuilder()
+    for gid, name in all_genres.items():
+        status = genre_status.get(gid, 0)
+        if status == 1:
+            mark = "✅ "
+        elif status == -1:
+            mark = "❌ "
+        else:
+            mark = "⬜ "
+        kb.add(InlineKeyboardButton(text=f"{mark}{name}", callback_data=f"rec_toggle_genre_{gid}"))
+    kb.adjust(2)
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="rec_prefs"))
+    try:
+        await c.message.edit_text(
+            "🎭 <b>Настройка жанров</b>\n\n"
+            "✅ нравится — приоритет в поиске\n"
+            "❌ не показывать — исключить\n"
+            "⬜ нейтрально\n\n"
+            "Нажми жанр чтобы переключить:",
+            reply_markup=kb.as_markup(), parse_mode="HTML"
+        )
+    except Exception:
+        await c.answer()
+
+@router.callback_query(F.data.startswith("rec_toggle_genre_"))
+async def rec_toggle_genre(c: types.CallbackQuery):
+    uid = c.from_user.id
+    gid = int(c.data.split("_")[3])
+
+    from services.discover import GENRES_MOVIE
+    genre_name = GENRES_MOVIE.get(gid, str(gid))
+
+    genres = await get_genres(uid)
+    current = next((g["status"] for g in genres if g["genre_id"] == gid), 0)
+
+    # цикл: 0 -> 1 -> -1 -> 0
+    if current == 0:
+        new_status = 1
+    elif current == 1:
+        new_status = -1
+    else:
+        new_status = 0
+
+    if new_status == 0:
+        async with __import__('storage.database', fromlist=['get_db']).get_db() as db:
+            await db.execute("DELETE FROM user_genres WHERE uid = ? AND genre_id = ?", (uid, gid))
+            await db.commit()
+    else:
+        await set_genre_status(uid, gid, genre_name, new_status)
+
+    await rec_edit_genres(c)
+    await c.answer()
+
+
+@router.callback_query(F.data == "rec_edit_year")
+async def rec_edit_year(c: types.CallbackQuery):
+    settings = await get_settings(c.from_user.id)
+    cur = settings["min_year"]
+    years = [1970, 1980, 1990, 2000, 2005, 2010, 2015, 2020]
+    kb = InlineKeyboardBuilder()
+    for y in years:
+        mark = "✅ " if cur == y else ""
+        kb.add(InlineKeyboardButton(text=f"{mark}{y}+", callback_data=f"rec_set_year_{y}"))
+    kb.adjust(4)
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="rec_prefs"))
+    await c.message.edit_text("📅 <b>Год от:</b> выбери минимальный год выхода",
+                              reply_markup=kb.as_markup(), parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("rec_set_year_"))
+async def rec_set_year(c: types.CallbackQuery):
+    year = int(c.data.split("_")[3])
+    await save_settings(c.from_user.id, min_year=year)
+    await c.answer(f"Год от {year} сохранён")
+    await rec_prefs(c)
+
+@router.callback_query(F.data == "rec_edit_rating")
+async def rec_edit_rating(c: types.CallbackQuery):
+    settings = await get_settings(c.from_user.id)
+    cur = settings["min_rating"]
+    ratings = [0, 5.0, 6.0, 6.5, 7.0, 7.5, 8.0]
+    labels = ["Любой", "5+", "6+", "6.5+", "7+", "7.5+", "8+"]
+    kb = InlineKeyboardBuilder()
+    for r, label in zip(ratings, labels):
+        mark = "✅ " if cur == r else ""
+        kb.add(InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"rec_set_rating_{r}"))
+    kb.adjust(4)
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="rec_prefs"))
+    await c.message.edit_text("⭐ <b>Рейтинг от:</b> выбери минимальный рейтинг",
+                              reply_markup=kb.as_markup(), parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("rec_set_rating_"))
+async def rec_set_rating(c: types.CallbackQuery):
+    rating = float(c.data.split("_")[3])
+    await save_settings(c.from_user.id, min_rating=rating)
+    await c.answer(f"Рейтинг от {rating} сохранён")
+    await rec_prefs(c)
 
 @router.callback_query(F.data == "rec_toggle_history")
 async def rec_toggle_history(c: types.CallbackQuery):
