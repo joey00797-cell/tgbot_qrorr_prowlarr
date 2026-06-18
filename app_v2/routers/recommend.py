@@ -47,6 +47,7 @@ def build_result_keyboard(media_type: str):
 _session_genres: dict = {}
 _last_result: dict = {}  # uid -> result
 _session_search: dict = {}  # uid -> {genre_ids, media_type}
+_shown_ids: dict = {}  # uid -> [tmdb_id, ...]
 
 @router.message(F.text == MENU_BUTTON)
 async def recommend_menu(message: types.Message):
@@ -71,7 +72,8 @@ async def rec_random(c: types.CallbackQuery):
         excluded_genre_ids=await get_excluded_genre_ids(uid) or None,
         min_year=prefs["min_year"],
         min_rating=prefs["min_rating"],
-        random_pick=True
+        random_pick=True,
+        shown_ids=_shown_ids.get(uid)
     )
     await _show_result(c, result)
 
@@ -125,13 +127,15 @@ async def rec_find(c: types.CallbackQuery):
         await c.message.delete()
         await c.message.answer("⏳ <b>Подбираю...</b>", parse_mode="HTML")
     excluded = await get_excluded_genre_ids(uid)
+    _shown_ids.pop(uid, None)
     result = await discover(
         media_type=media_type,
         genre_ids=selected or None,
         excluded_genre_ids=excluded or None,
         min_year=prefs["min_year"],
         min_rating=prefs["min_rating"],
-        random_pick=True
+        random_pick=True,
+        shown_ids=None
     )
     _session_search[uid] = {"genre_ids": selected, "media_type": media_type}
     await _show_result(c, result, media_type)
@@ -152,7 +156,8 @@ async def rec_more(c: types.CallbackQuery):
         excluded_genre_ids=await get_excluded_genre_ids(uid) or None,
         min_year=prefs["min_year"],
         min_rating=prefs["min_rating"],
-        random_pick=True
+        random_pick=True,
+        shown_ids=_shown_ids.get(uid)
     )
     await _show_result(c, result, media_type)
 
@@ -193,11 +198,15 @@ async def rec_prefs(c: types.CallbackQuery):
 
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="🎭 Настроить жанры", callback_data="rec_edit_genres"))
-    kb.row(InlineKeyboardButton(text="📅 Год от: " + str(settings["min_year"]), callback_data="rec_edit_year"))
-    kb.row(InlineKeyboardButton(text="⭐ Рейтинг от: " + str(settings["min_rating"]), callback_data="rec_edit_rating"))
-    kb.row(InlineKeyboardButton(text="🔄 История: " + history_label, callback_data="rec_toggle_history"))
-    kb.row(InlineKeyboardButton(text="🗑 Сбросить всё", callback_data="rec_prefs_reset"))
-    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="rec_back"))
+    kb.row(
+        InlineKeyboardButton(text="📅 Год", callback_data="rec_edit_year"),
+        InlineKeyboardButton(text="⭐ Рейтинг", callback_data="rec_edit_rating"),
+        InlineKeyboardButton(text="🔄 История", callback_data="rec_toggle_history"),
+    )
+    kb.row(
+        InlineKeyboardButton(text="🗑 Сбросить", callback_data="rec_prefs_reset"),
+        InlineKeyboardButton(text="🔙 Назад", callback_data="rec_back"),
+    )
     try:
         await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
@@ -330,37 +339,43 @@ async def rec_back(c: types.CallbackQuery):
         reply_markup=build_recommend_menu(),
         parse_mode="HTML"
     )
-
 async def _show_result(c: types.CallbackQuery, result: dict, media_type: str = "movie"):
+    uid = c.from_user.id
     kb_back = InlineKeyboardBuilder()
+    kb_back.row(InlineKeyboardButton(text="⚙️ Изменить параметры", callback_data="rec_prefs"))
     kb_back.row(InlineKeyboardButton(text="🔙 Назад", callback_data="rec_back"))
 
-    if not result:
+    if not result or result.get("exhausted"):
+        _shown_ids.pop(uid, None)
+        if result and result.get("exhausted"):
+            msg = "🏁 <b>Все результаты показаны!</b>\n\nПопробуй изменить жанр, год или рейтинг."
+        else:
+            msg = "😔 <b>Ничего не нашлось</b>\n\nПопробуй изменить фильтры."
         try:
-            await c.message.edit_text(
-                "😔 <b>Ничего не нашлось</b>\n\nПопробуй изменить фильтры.",
-                reply_markup=kb_back.as_markup(), parse_mode="HTML"
-            )
+            await c.message.edit_text(msg, reply_markup=kb_back.as_markup(), parse_mode="HTML")
         except Exception:
-            await c.message.answer(
-                "😔 <b>Ничего не нашлось</b>\n\nПопробуй изменить фильтры.",
-                reply_markup=kb_back.as_markup(), parse_mode="HTML"
-            )
+            await c.message.answer(msg, reply_markup=kb_back.as_markup(), parse_mode="HTML")
         return
 
+    # сохраняем показанный id
+    shown = _shown_ids.get(uid, [])
+    shown.append(result["tmdb_id"])
+    _shown_ids[uid] = shown
+
     type_label = "🎬 Фильм" if media_type == "movie" else "📺 Сериал"
-    text = (f"{type_label} <b>{e(result['title'])}</b> ({result['release']})\n"
-            f"⭐ {result['rating']:.1f} | 🎭 {e(result['genres'])}\n\n"
-            f"<i>{e(result['overview'])}</i>")
+    title = e(result["title"])
+    release = result["release"]
+    rating = result["rating"]
+    genres = e(result["genres"])
+    overview = e(result["overview"])
+    text = f"{type_label} <b>{title}</b> ({release})\n⭐ {rating:.1f} | 🎭 {genres}\n\n<i>{overview}</i>"
 
-    _last_result[c.from_user.id] = result
+    _last_result[uid] = result
     kb = build_result_keyboard(media_type)
-
     try:
         await c.message.delete()
     except Exception:
         pass
-
     try:
         if result.get("poster"):
             await c.message.answer_photo(

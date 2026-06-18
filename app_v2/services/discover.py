@@ -30,7 +30,8 @@ async def get_genres(media_type: str = "movie") -> dict:
 async def discover(media_type: str = "movie", genre_ids: list = None,
                    excluded_genre_ids: list = None,
                    min_year: int = 2000, min_rating: float = 6.5,
-                   random_pick: bool = True) -> dict | None:
+                   random_pick: bool = True,
+                   shown_ids: list = None) -> dict | None:
     params = {
         "api_key": _config.TMDB_API_KEY,
         "language": "ru-RU",
@@ -67,8 +68,10 @@ async def discover(media_type: str = "movie", genre_ids: list = None,
                     data = await r.json()
                 results = data.get("results", [])
 
+            if shown_ids:
+                results = [r for r in results if r.get("id") not in shown_ids]
             if not results:
-                return None
+                return {"exhausted": True}
 
             item = random.choice(results)
             poster = f"{POSTER_BASE}{item['poster_path']}" if item.get("poster_path") else None
